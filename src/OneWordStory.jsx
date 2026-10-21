@@ -6,6 +6,10 @@ import { createClient } from "@supabase/supabase-js";
 const SUPABASE_URL = "https://wzeenraywlbxhecdnrfv.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_7LjFzl3p3NkkEoCv7AL1qQ_eA1zhltb";
 
+// Read the URL hash before Supabase consumes it, so we know the user arrived via a reset link
+const RECOVERY_IN_URL =
+  typeof window !== "undefined" && window.location.hash.includes("type=recovery");
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -645,18 +649,33 @@ function Toast({ msg }) {
 }
 
 function AuthScreen({ onAuth }) {
-  const [mode, setMode] = useState("login");
+  const [mode, setMode] = useState("login"); // login | signup | forgot
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+
+  function switchMode(m) {
+    setMode(m);
+    setError("");
+    setInfo("");
+  }
 
   async function handleSubmit() {
     setError("");
+    setInfo("");
     setLoading(true);
     try {
-      if (mode === "login") {
+      if (mode === "forgot") {
+        if (!email.trim()) throw new Error("Enter your email address.");
+        const { error: e } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: window.location.origin,
+        });
+        if (e) throw e;
+        setInfo("If an account exists for that email, a reset link is on its way. Check your inbox (and spam).");
+      } else if (mode === "login") {
         const { error: e } = await supabase.auth.signInWithPassword({ email, password });
         if (e) throw e;
       } else {
@@ -683,22 +702,31 @@ function AuthScreen({ onAuth }) {
         <div className="auth-sub">collaborative tales, one word at a time</div>
       </div>
 
-      <div className="tab-row">
-        <button className={`tab ${mode === "login" ? "active" : ""}`} onClick={() => setMode("login")}>Sign in</button>
-        <button className={`tab ${mode === "signup" ? "active" : ""}`} onClick={() => setMode("signup")}>Create account</button>
-      </div>
+      {mode !== "forgot" ? (
+        <div className="tab-row">
+          <button className={`tab ${mode === "login" ? "active" : ""}`} onClick={() => switchMode("login")}>Sign in</button>
+          <button className={`tab ${mode === "signup" ? "active" : ""}`} onClick={() => switchMode("signup")}>Create account</button>
+        </div>
+      ) : (
+        <div style={{ marginBottom: 20, fontSize: 14, color: "var(--ink2)" }}>
+          Enter your email and we'll send you a link to reset your password.
+        </div>
+      )}
 
       {error && <div className="error-box">{error}</div>}
+      {info && <div className="completed-banner">{info}</div>}
 
       <div className="field">
         <label>Email</label>
         <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" />
       </div>
 
-      <div className="field">
-        <label>Password</label>
-        <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
-      </div>
+      {mode !== "forgot" && (
+        <div className="field">
+          <label>Password</label>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
+        </div>
+      )}
 
       {mode === "signup" && (
         <div className="field">
@@ -709,7 +737,72 @@ function AuthScreen({ onAuth }) {
       )}
 
       <button className="btn btn-primary" onClick={handleSubmit} disabled={loading}>
-        {loading ? <span className="spinner" /> : mode === "login" ? "Sign in" : "Create account"}
+        {loading ? <span className="spinner" /> :
+          mode === "login" ? "Sign in" : mode === "signup" ? "Create account" : "Send reset link"}
+      </button>
+
+      {mode === "login" && (
+        <div style={{ textAlign: "center", marginTop: 16 }}>
+          <button className="back-btn" style={{ margin: "0 auto", fontSize: 13 }} onClick={() => switchMode("forgot")}>
+            Forgot password?
+          </button>
+        </div>
+      )}
+      {mode === "forgot" && (
+        <div style={{ textAlign: "center", marginTop: 16 }}>
+          <button className="back-btn" style={{ margin: "0 auto", fontSize: 13 }} onClick={() => switchMode("login")}>
+            ← Back to sign in
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResetPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSubmit() {
+    setError("");
+    if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (password !== confirm) { setError("Passwords don't match."); return; }
+    setLoading(true);
+    const { error: e } = await supabase.auth.updateUser({ password });
+    setLoading(false);
+    if (e) { setError(e.message); return; }
+    window.history.replaceState(null, "", window.location.pathname); // clean the URL
+    onDone();
+  }
+
+  return (
+    <div className="screen">
+      <div className="auth-hero">
+        <div className="auth-wordmark">new<br />password</div>
+        <div className="auth-sub">choose something you'll remember</div>
+      </div>
+
+      {error && <div className="error-box">{error}</div>}
+
+      <div className="field">
+        <label>New password</label>
+        <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
+      </div>
+      <div className="field">
+        <label>Confirm password</label>
+        <input
+          type="password"
+          value={confirm}
+          onChange={e => setConfirm(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && handleSubmit()}
+          placeholder="••••••••"
+        />
+      </div>
+
+      <button className="btn btn-primary" onClick={handleSubmit} disabled={loading}>
+        {loading ? <span className="spinner" /> : "Update password"}
       </button>
     </div>
   );
@@ -1119,10 +1212,12 @@ export default function App() {
   const [selectedGameId, setSelectedGameId] = useState(null);
   const [games, setGames] = useState([]);
   const [gamesLoading, setGamesLoading] = useState(false);
+  const [recovering, setRecovering] = useState(RECOVERY_IN_URL);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
       setSession(session);
     });
     return () => subscription.unsubscribe();
@@ -1193,6 +1288,16 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
         </pre>
         <p style={{ marginTop: 12 }}>Find these in your Supabase dashboard under <strong>Project Settings → API</strong>.</p>
         <p style={{ marginTop: 12 }}>Also run the SQL schema from the implementation plan in your Supabase SQL Editor first.</p>
+      </div>
+    );
+  }
+
+  if (recovering) {
+    return (
+      <div className="app">
+        {session
+          ? <ResetPasswordScreen onDone={() => setRecovering(false)} />
+          : <div className="screen empty-state"><span className="spinner" /></div>}
       </div>
     );
   }
