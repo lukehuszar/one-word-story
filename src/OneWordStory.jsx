@@ -1201,22 +1201,16 @@ function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled
   );
 }
 
-function CreateGameScreen({ userId, onBack, onCreated, toast }) {
-  const [name, setName] = useState("");
-  const [timeLimit, setTimeLimit] = useState(24);
-  const [playerInput, setPlayerInput] = useState("");
-  const [players, setPlayers] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
+function AddPlayerInput({ excludeIds, onPick, onError }) {
+  const [input, setInput] = useState("");
   const [suggestions, setSuggestions] = useState([]);
-  const [showSuggest, setShowSuggest] = useState(false);
+  const [show, setShow] = useState(false);
   const [activeIdx, setActiveIdx] = useState(-1);
   const reqId = useRef(0);
 
   // Look up usernames starting with what's been typed (debounced; stale replies are ignored)
   useEffect(() => {
-    const q = playerInput.trim().toLowerCase();
+    const q = input.trim().toLowerCase();
     if (!q) { setSuggestions([]); return; }
     const id = ++reqId.current;
     const t = setTimeout(async () => {
@@ -1232,46 +1226,96 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
       setActiveIdx(-1);
     }, 200);
     return () => clearTimeout(t);
-  }, [playerInput]);
+  }, [input]);
 
-  // Hide yourself and anyone already added
-  const visibleSuggestions = suggestions
-    .filter(u => u.id !== userId && !players.some(p => p.id === u.id))
-    .slice(0, 6);
+  // Hide anyone who's already in the game
+  const visible = suggestions.filter(u => !excludeIds.includes(u.id)).slice(0, 6);
+
+  async function pick(profile) {
+    setInput("");
+    setSuggestions([]);
+    setShow(false);
+    await onPick(profile);
+  }
+
+  async function addTyped() {
+    const un = input.trim().toLowerCase();
+    if (!un) return;
+    const { data } = await supabase
+      .from("profiles").select("id, username, avatar_url").eq("username", un).maybeSingle();
+    if (!data) { onError(`User "${un}" not found`); return; }
+    if (excludeIds.includes(data.id)) { onError("Already in this game"); return; }
+    pick(data);
+  }
+
+  function onKeyDown(e) {
+    if (e.key === "ArrowDown" && visible.length) {
+      e.preventDefault(); setShow(true); setActiveIdx(i => (i + 1) % visible.length);
+    } else if (e.key === "ArrowUp" && visible.length) {
+      e.preventDefault(); setActiveIdx(i => (i <= 0 ? visible.length - 1 : i - 1));
+    } else if (e.key === "Escape") {
+      setShow(false);
+    } else if (e.key === "Enter") {
+      if (show && activeIdx >= 0 && visible[activeIdx]) pick(visible[activeIdx]);
+      else addTyped();
+    }
+  }
+
+  return (
+    <div className="word-input-row">
+      <div className="field suggest-wrap">
+        <input
+          value={input}
+          onChange={e => { setInput(e.target.value); setShow(true); }}
+          onFocus={() => setShow(true)}
+          onBlur={() => setTimeout(() => setShow(false), 150)}
+          onKeyDown={onKeyDown}
+          placeholder="add by username…"
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+        />
+        {show && visible.length > 0 && (
+          <ul className="suggest-list" role="listbox">
+            {visible.map((u, i) => {
+              const typed = input.trim().length;
+              return (
+                <li
+                  key={u.id}
+                  role="option"
+                  aria-selected={i === activeIdx}
+                  className={`suggest-item ${i === activeIdx ? "active" : ""}`}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => pick(u)}
+                >
+                  <Avatar username={u.username} url={u.avatar_url} size={28} />
+                  <span>
+                    <span className="suggest-match">{u.username.slice(0, typed)}</span>
+                    {u.username.slice(typed)}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+      <button className="btn btn-ghost btn-sm" onClick={addTyped}>Add</button>
+    </div>
+  );
+}
+
+function CreateGameScreen({ userId, onBack, onCreated, toast }) {
+  const [name, setName] = useState("");
+  const [timeLimit, setTimeLimit] = useState(24);
+  const [players, setPlayers] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   function addProfile(profile) {
     if (profile.id === userId) { setError("You're already in the game"); return; }
-    if (players.length >= 5) { setError("Max 6 players"); return; }
     if (players.some(p => p.id === profile.id)) { setError("Already added"); return; }
     setPlayers(p => [...p, profile]);
-    setPlayerInput("");
-    setSuggestions([]);
-    setShowSuggest(false);
     setError("");
-  }
-
-  async function addPlayer() {
-    const un = playerInput.trim().toLowerCase();
-    if (!un) return;
-    const { data } = await supabase.from("profiles").select("id, username, avatar_url").eq("username", un).maybeSingle();
-    if (!data) { setError(`User "${un}" not found`); return; }
-    addProfile(data);
-  }
-
-  function handleInputKeyDown(e) {
-    if (e.key === "ArrowDown" && visibleSuggestions.length) {
-      e.preventDefault();
-      setShowSuggest(true);
-      setActiveIdx(i => (i + 1) % visibleSuggestions.length);
-    } else if (e.key === "ArrowUp" && visibleSuggestions.length) {
-      e.preventDefault();
-      setActiveIdx(i => (i <= 0 ? visibleSuggestions.length - 1 : i - 1));
-    } else if (e.key === "Escape") {
-      setShowSuggest(false);
-    } else if (e.key === "Enter") {
-      if (showSuggest && activeIdx >= 0 && visibleSuggestions[activeIdx]) addProfile(visibleSuggestions[activeIdx]);
-      else addPlayer();
-    }
   }
 
   async function createGame() {
@@ -1348,44 +1392,12 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
           </div>
         ))}
 
-        <div className="word-input-row" style={{ marginBottom: 20 }}>
-          <div className="field suggest-wrap">
-            <input
-              value={playerInput}
-              onChange={e => { setPlayerInput(e.target.value); setShowSuggest(true); }}
-              onFocus={() => setShowSuggest(true)}
-              onBlur={() => setTimeout(() => setShowSuggest(false), 150)}
-              onKeyDown={handleInputKeyDown}
-              placeholder="add by username…"
-              autoComplete="off"
-              autoCapitalize="none"
-              spellCheck={false}
-            />
-            {showSuggest && visibleSuggestions.length > 0 && (
-              <ul className="suggest-list" role="listbox">
-                {visibleSuggestions.map((u, i) => {
-                  const typed = playerInput.trim().length;
-                  return (
-                    <li
-                      key={u.id}
-                      role="option"
-                      aria-selected={i === activeIdx}
-                      className={`suggest-item ${i === activeIdx ? "active" : ""}`}
-                      onMouseDown={e => e.preventDefault()}
-                      onClick={() => addProfile(u)}
-                    >
-                      <Avatar username={u.username} url={u.avatar_url} size={28} />
-                      <span>
-                        <span className="suggest-match">{u.username.slice(0, typed)}</span>
-                        {u.username.slice(typed)}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-          <button className="btn btn-ghost btn-sm" onClick={addPlayer}>Add</button>
+        <div style={{ marginBottom: 8 }}>
+          <AddPlayerInput
+            excludeIds={[userId, ...players.map(p => p.id)]}
+            onPick={addProfile}
+            onError={setError}
+          />
         </div>
 
         <button className="btn btn-primary" onClick={createGame} disabled={loading}>
@@ -1404,6 +1416,8 @@ function GamePlayScreen({ gameId, userId, onBack }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [addError, setAddError] = useState("");
   const [, setNow] = useState(Date.now()); // forces re-render so the countdown updates
 
   const showToast = (msg) => {
@@ -1455,6 +1469,9 @@ function GamePlayScreen({ gameId, userId, onBack }) {
       .on("postgres_changes",
         { event: "*", schema: "public", table: "games", filter: `id=eq.${gameId}` },
         () => loadGame(false))
+      .on("postgres_changes",
+        { event: "INSERT", schema: "public", table: "game_players", filter: `game_id=eq.${gameId}` },
+        () => loadGame(false))
       .subscribe();
 
     // Phones drop sockets when the tab sleeps, so catch up when it wakes
@@ -1487,6 +1504,34 @@ function GamePlayScreen({ gameId, userId, onBack }) {
       setError(e.message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // New players always go to the end of the rotation (highest player_order + 1)
+  async function handleAddPlayer(profile) {
+    setAddError("");
+    try {
+      // Read fresh so two people adding at once don't pick the same slot
+      const { data: current, error: le } = await supabase
+        .from("game_players")
+        .select("user_id, player_order")
+        .eq("game_id", gameId);
+      if (le) throw le;
+      if (current.some(p => p.user_id === profile.id)) throw new Error("Already in this game");
+
+      const nextOrder = Math.max(-1, ...current.map(p => p.player_order)) + 1;
+      const { error: ie } = await supabase.from("game_players").insert({
+        game_id: gameId,
+        user_id: profile.id,
+        player_order: nextOrder,
+      });
+      if (ie) throw ie;
+
+      showToast(`@${profile.username} added`);
+      setShowAdd(false);
+      await loadGame(false);
+    } catch (e) {
+      setAddError(e.message);
     }
   }
 
@@ -1606,6 +1651,32 @@ function GamePlayScreen({ gameId, userId, onBack }) {
             )}
           </div>
         ))}
+
+        {game.status === "active" && (
+          <div style={{ marginTop: 12 }}>
+            {!showAdd ? (
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowAdd(true)}>
+                + Add player
+              </button>
+            ) : (
+              <>
+                {addError && <div className="error-box">{addError}</div>}
+                <AddPlayerInput
+                  excludeIds={playerOrder.map(p => p.user_id)}
+                  onPick={handleAddPlayer}
+                  onError={setAddError}
+                />
+                <button
+                  className="back-btn"
+                  style={{ fontSize: 13 }}
+                  onClick={() => { setShowAdd(false); setAddError(""); }}
+                >
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <Toast msg={toast} />
