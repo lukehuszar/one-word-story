@@ -13,11 +13,35 @@ const RECOVERY_IN_URL =
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
+// Punctuation allowed around a word (hyphens/apostrophes inside a word are handled separately)
+const PUNCT = `.,!?;:"'“”‘’()…—–`;
+const P = PUNCT.replace(/[\]\\^-]/g, "\\$&");
+
+// [tail + space]? [0-2 punct] word [0-2 punct]
+//   tail   = 1–2 punctuation marks that attach to the PREVIOUS word (e.g. ". " or '." ')
+//   prefix = 0–2 marks before the word (e.g. “ or ("), suffix = 0–2 marks after (e.g. !")
+const ENTRY_RE = new RegExp(
+  `^(?:([${P}]{1,2})\\s+)?([${P}]{0,2})([\\p{L}\\p{N}_][\\p{L}\\p{N}_'’-]*)([${P}]{0,2})$`,
+  "u"
+);
+
+function parseEntry(input) {
+  const trimmed = input.trim().replace(/\s+/g, " ");
+  if (!trimmed || trimmed.length > 50) return null;
+  const m = ENTRY_RE.exec(trimmed);
+  if (!m) return null;
+  return { normalized: trimmed, tail: m[1] || "", prefix: m[2], body: m[3], suffix: m[4] };
+}
+
 function validateWord(input) {
-  const trimmed = input.trim();
-  if (!trimmed || trimmed.length > 50) return false;
-  const pattern = /^[\p{L}\p{N}_'’-]+[.,!?;:]*$/u;
-  return pattern.test(trimmed);
+  return parseEntry(input) !== null;
+}
+
+// For display: split a stored entry into the part that glues to the previous word and the rest.
+// Lenient on purpose so older entries (no tail) always render fine.
+function splitEntry(text) {
+  const m = /^([^\s\p{L}\p{N}]{1,3})\s+(.+)$/u.exec(text);
+  return m ? { tail: m[1], body: m[2] } : { tail: "", body: text };
 }
 
 function timeLeft(deadline) {
@@ -32,7 +56,14 @@ function timeLeft(deadline) {
 }
 
 function storyText(words) {
-  return words.map((w) => w.word_text).join(" ");
+  return words
+    .map((w, i) => {
+      const { tail, body } = splitEntry(w.word_text);
+      if (i === 0) return body;
+      return tail ? `${tail} ${body}` : ` ${body}`;
+    })
+    .join("")
+    .trimStart();
 }
 
 // ─── SOUND ───────────────────────────────────────────────────────────────────
@@ -152,7 +183,11 @@ async function checkAndAdvanceTurn(game) {
 }
 
 async function submitWord(game, word, userId) {
-  if (!validateWord(word)) throw new Error("Invalid word: one word only, optional punctuation at the end.");
+  const parsed = parseEntry(word);
+  if (!parsed)
+    throw new Error(
+      'Use one word, with up to 2 punctuation marks before and 2 after (e.g. "Heavens!"). To end the previous sentence, start with punctuation and a space (e.g. ". Then,").'
+    );
 
   await checkAndAdvanceTurn(game);
 
@@ -170,10 +205,13 @@ async function submitWord(game, word, userId) {
     .select("*", { count: "exact", head: true })
     .eq("game_id", game.id);
 
+  if (parsed.tail && !count)
+    throw new Error("There's no previous word to attach that punctuation to yet.");
+
   await supabase.from("story_words").insert({
     game_id: game.id,
     user_id: userId,
-    word_text: word.trim(),
+    word_text: parsed.normalized,
     word_order: count || 0,
   });
 
@@ -1497,11 +1535,16 @@ function GamePlayScreen({ gameId, userId, onBack }) {
         <div className="story-box">
           {words.length === 0
             ? <span className="story-empty">The story begins…</span>
-            : words.map((w, i) => (
-              <span key={w.id} className={`word-chip ${w.user_id === userId ? "mine" : ""}`}>
-                {i > 0 ? " " : ""}{w.word_text}
-              </span>
-            ))}
+            : words.map((w, i) => {
+              const { tail, body } = splitEntry(w.word_text);
+              const attach = tail && i > 0; // tail glues to the previous word
+              return (
+                <span key={w.id} className={`word-chip ${w.user_id === userId ? "mine" : ""}`}>
+                  {i > 0 && !attach ? " " : ""}
+                  {attach ? `${tail} ${body}` : body}
+                </span>
+              );
+            })}
         </div>
 
         {game.status === "active" && (
@@ -1532,6 +1575,12 @@ function GamePlayScreen({ gameId, userId, onBack }) {
                 <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting || !wordInput.trim()}>
                   {submitting ? <span className="spinner" /> : "Add"}
                 </button>
+              </div>
+            )}
+
+            {isMyTurn && (
+              <div className="username-hint" style={{ marginBottom: 12 }}>
+                Up to 2 punctuation marks before and after your word. Start with “. ” to end the previous sentence.
               </div>
             )}
 
