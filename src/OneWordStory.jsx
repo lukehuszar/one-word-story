@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -33,6 +33,96 @@ function timeLeft(deadline) {
 
 function storyText(words) {
   return words.map((w) => w.word_text).join(" ");
+}
+
+// ─── SOUND ───────────────────────────────────────────────────────────────────
+// Preference is stored per device. Enabled unless explicitly switched off.
+const SOUND_KEY = "ows_sound_enabled";
+
+function getSoundEnabled() {
+  try { return localStorage.getItem(SOUND_KEY) !== "false"; } catch { return true; }
+}
+
+function saveSoundEnabled(on) {
+  try { localStorage.setItem(SOUND_KEY, String(on)); } catch { /* storage unavailable */ }
+}
+
+let audioCtx = null;
+
+function getAudioCtx() {
+  if (typeof window === "undefined") return null;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!audioCtx) audioCtx = new AC();
+  return audioCtx;
+}
+
+// Browsers only allow audio after a user gesture, so unlock on the first tap/keypress
+function unlockAudio() {
+  const ctx = getAudioCtx();
+  if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+}
+
+if (typeof window !== "undefined") {
+  ["pointerdown", "keydown", "touchend"].forEach((ev) =>
+    window.addEventListener(ev, unlockAudio, { passive: true })
+  );
+}
+
+// Synthesised bell: a few inharmonic sine partials with a long decay (no audio file needed)
+function playBell() {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  const now = ctx.currentTime;
+  const master = ctx.createGain();
+  master.gain.setValueAtTime(0.0001, now);
+  master.gain.exponentialRampToValueAtTime(0.35, now + 0.01);
+  master.gain.exponentialRampToValueAtTime(0.0001, now + 1.8);
+  master.connect(ctx.destination);
+
+  const base = 880;
+  [[1, 1], [2.76, 0.5], [5.4, 0.25], [8.93, 0.12]].forEach(([ratio, amp]) => {
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = base * ratio;
+    g.gain.setValueAtTime(amp, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 1.8 / Math.sqrt(ratio));
+    osc.connect(g);
+    g.connect(master);
+    osc.start(now);
+    osc.stop(now + 1.9);
+  });
+}
+
+// ─── AVATAR HELPERS ──────────────────────────────────────────────────────────
+// Center-crop to a square and shrink to 256px JPEG so uploads stay tiny
+function resizeImageToBlob(file, size = 256) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const side = Math.min(img.width, img.height);
+      const sx = (img.width - side) / 2;
+      const sy = (img.height - side) / 2;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      canvas.getContext("2d").drawImage(img, sx, sy, side, side, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("Could not process that image."))),
+        "image/jpeg",
+        0.85
+      );
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("That file doesn't look like an image we can read."));
+    };
+    img.src = url;
+  });
 }
 
 // ─── GAME LOGIC ──────────────────────────────────────────────────────────────
@@ -453,6 +543,81 @@ const css = `
 
   .player-name { font-weight: 600; flex: 1; }
 
+  .player-avatar { overflow: hidden; }
+  .player-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .avatar-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    border-radius: 50%;
+    display: flex;
+  }
+  .avatar-btn:hover .player-avatar,
+  .avatar-btn:focus-visible .player-avatar { border-color: var(--accent); }
+
+  /* ── Profile ── */
+  .profile-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0 24px;
+  }
+  .profile-name { font-size: 20px; font-weight: 600; }
+  .profile-actions { display: flex; gap: 8px; }
+
+  .setting-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    margin-bottom: 10px;
+  }
+  .setting-row input {
+    width: 20px;
+    height: 20px;
+    margin-top: 2px;
+    flex-shrink: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .setting-title { font-size: 15px; font-weight: 600; }
+  .setting-hint { font-size: 12px; color: var(--ink3); margin-top: 2px; }
+
+  /* ── Username suggestions ── */
+  .suggest-wrap { position: relative; }
+  .suggest-list {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 50;
+    list-style: none;
+    background: var(--paper);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+    overflow: hidden;
+  }
+  .suggest-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  .suggest-item + .suggest-item { border-top: 1px solid var(--border); }
+  .suggest-item.active,
+  .suggest-item:hover { background: var(--paper2); }
+  .suggest-match { color: var(--accent); font-weight: 600; }
+
   .remove-btn {
     background: none;
     border: none;
@@ -648,6 +813,17 @@ function Toast({ msg }) {
   return <div className="toast">{msg}</div>;
 }
 
+function Avatar({ username, url, size = 32 }) {
+  return (
+    <div
+      className="player-avatar"
+      style={{ width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.38)) }}
+    >
+      {url ? <img src={url} alt="" /> : (username || "?")[0].toUpperCase()}
+    </div>
+  );
+}
+
 function AuthScreen({ onAuth }) {
   const [mode, setMode] = useState("login"); // login | signup | forgot
   const [email, setEmail] = useState("");
@@ -808,7 +984,7 @@ function ResetPasswordScreen({ onDone }) {
   );
 }
 
-function GameListScreen({ userId, username, onSelectGame, onCreateGame, onRefresh, games, loading }) {
+function GameListScreen({ userId, username, avatarUrl, onOpenProfile, onSelectGame, onCreateGame, onRefresh, games, loading }) {
   const myTurnGames = games.filter(g => g.current_turn_user_id === userId && g.status === "active");
   const waitingGames = games.filter(g => g.current_turn_user_id !== userId && g.status === "active");
   const completedGames = games.filter(g => g.status === "completed");
@@ -841,7 +1017,9 @@ function GameListScreen({ userId, username, onSelectGame, onCreateGame, onRefres
           <div className="logo-mark">one word story</div>
           <div className="header-title">@{username}</div>
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        <button className="avatar-btn" onClick={onOpenProfile} aria-label="Profile and settings">
+          <Avatar username={username} url={avatarUrl} size={40} />
+        </button>
       </div>
 
       <div className="screen">
@@ -882,6 +1060,109 @@ function GameListScreen({ userId, username, onSelectGame, onCreateGame, onRefres
   );
 }
 
+function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled, onSoundChange }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const fileRef = useRef(null);
+  const path = `${userId}/avatar.jpg`;
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(""), 2000);
+  };
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setError("Choose an image file."); return; }
+    if (file.size > 15 * 1024 * 1024) { setError("That image is over 15 MB. Choose a smaller one."); return; }
+    setError("");
+    setUploading(true);
+    try {
+      const blob = await resizeImageToBlob(file);
+      const { error: ue } = await supabase.storage
+        .from("avatars")
+        .upload(path, blob, { upsert: true, contentType: "image/jpeg", cacheControl: "3600" });
+      if (ue) throw ue;
+      const { data: pub } = supabase.storage.from("avatars").getPublicUrl(path);
+      const url = `${pub.publicUrl}?v=${Date.now()}`; // bust caches after replacing
+      const { error: pe } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", userId);
+      if (pe) throw pe;
+      onProfileUpdated({ ...profile, avatar_url: url });
+      showToast("Photo updated");
+    } catch (err) {
+      setError(err.message || "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleRemove() {
+    setError("");
+    setUploading(true);
+    try {
+      await supabase.storage.from("avatars").remove([path]);
+      const { error: pe } = await supabase.from("profiles").update({ avatar_url: null }).eq("id", userId);
+      if (pe) throw pe;
+      onProfileUpdated({ ...profile, avatar_url: null });
+      showToast("Photo removed");
+    } catch (err) {
+      setError(err.message || "Could not remove photo.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function handleSoundToggle(e) {
+    const on = e.target.checked;
+    onSoundChange(on);
+    if (on) playBell(); // preview, and the tap also unlocks audio
+  }
+
+  return (
+    <>
+      <div className="header">
+        <button className="back-btn" onClick={onBack}>← Games</button>
+        <div className="header-title">Profile</div>
+        <div style={{ width: 60 }} />
+      </div>
+      <div className="screen">
+        {error && <div className="error-box">{error}</div>}
+
+        <div className="profile-hero">
+          <Avatar username={profile.username} url={profile.avatar_url} size={96} />
+          <div className="profile-name">@{profile.username}</div>
+          <div className="profile-actions">
+            <button className="btn btn-ghost btn-sm" onClick={() => fileRef.current?.click()} disabled={uploading}>
+              {uploading ? <span className="spinner" /> : profile.avatar_url ? "Change photo" : "Upload photo"}
+            </button>
+            {profile.avatar_url && (
+              <button className="btn btn-ghost btn-sm" onClick={handleRemove} disabled={uploading}>Remove</button>
+            )}
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+        </div>
+
+        <div className="section-label">Settings</div>
+        <label className="setting-row">
+          <input type="checkbox" checked={soundEnabled} onChange={handleSoundToggle} />
+          <div>
+            <div className="setting-title">Play a bell on my turn</div>
+            <div className="setting-hint">Rings while the app is open. Saved on this device.</div>
+          </div>
+        </label>
+
+        <div style={{ marginTop: 24 }}>
+          <button className="btn btn-ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
+        </div>
+      </div>
+      <Toast msg={toast} />
+    </>
+  );
+}
+
 function CreateGameScreen({ userId, onBack, onCreated, toast }) {
   const [name, setName] = useState("");
   const [timeLimit, setTimeLimit] = useState(24);
@@ -890,16 +1171,69 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggest, setShowSuggest] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const reqId = useRef(0);
+
+  // Look up usernames starting with what's been typed (debounced; stale replies are ignored)
+  useEffect(() => {
+    const q = playerInput.trim().toLowerCase();
+    if (!q) { setSuggestions([]); return; }
+    const id = ++reqId.current;
+    const t = setTimeout(async () => {
+      const escaped = q.replace(/[\%_]/g, "\\$&"); // _ is valid in usernames, so don't treat it as a wildcard
+      const { data } = await supabase
+        .from("profiles")
+        .select("id, username, avatar_url")
+        .ilike("username", `${escaped}%`)
+        .order("username")
+        .limit(10);
+      if (id !== reqId.current) return;
+      setSuggestions(data || []);
+      setActiveIdx(-1);
+    }, 200);
+    return () => clearTimeout(t);
+  }, [playerInput]);
+
+  // Hide yourself and anyone already added
+  const visibleSuggestions = suggestions
+    .filter(u => u.id !== userId && !players.some(p => p.id === u.id))
+    .slice(0, 6);
+
+  function addProfile(profile) {
+    if (profile.id === userId) { setError("You're already in the game"); return; }
+    if (players.length >= 5) { setError("Max 6 players"); return; }
+    if (players.some(p => p.id === profile.id)) { setError("Already added"); return; }
+    setPlayers(p => [...p, profile]);
+    setPlayerInput("");
+    setSuggestions([]);
+    setShowSuggest(false);
+    setError("");
+  }
+
   async function addPlayer() {
     const un = playerInput.trim().toLowerCase();
     if (!un) return;
-    if (players.length >= 5) { setError("Max 6 players"); return; }
-    if (players.find(p => p.username === un)) { setError("Already added"); return; }
-    const { data } = await supabase.from("profiles").select("id, username").eq("username", un).single();
+    const { data } = await supabase.from("profiles").select("id, username, avatar_url").eq("username", un).maybeSingle();
     if (!data) { setError(`User "${un}" not found`); return; }
-    setPlayers(p => [...p, data]);
-    setPlayerInput("");
-    setError("");
+    addProfile(data);
+  }
+
+  function handleInputKeyDown(e) {
+    if (e.key === "ArrowDown" && visibleSuggestions.length) {
+      e.preventDefault();
+      setShowSuggest(true);
+      setActiveIdx(i => (i + 1) % visibleSuggestions.length);
+    } else if (e.key === "ArrowUp" && visibleSuggestions.length) {
+      e.preventDefault();
+      setActiveIdx(i => (i <= 0 ? visibleSuggestions.length - 1 : i - 1));
+    } else if (e.key === "Escape") {
+      setShowSuggest(false);
+    } else if (e.key === "Enter") {
+      if (showSuggest && activeIdx >= 0 && visibleSuggestions[activeIdx]) addProfile(visibleSuggestions[activeIdx]);
+      else addPlayer();
+    }
   }
 
   async function createGame() {
@@ -970,20 +1304,48 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
         </div>
         {players.map((p, i) => (
           <div className="player-row" key={p.id}>
-            <div className="player-avatar">{p.username[0].toUpperCase()}</div>
+            <Avatar username={p.username} url={p.avatar_url} />
             <span className="player-name">@{p.username}</span>
             <button className="remove-btn" onClick={() => setPlayers(ps => ps.filter((_, j) => j !== i))}>×</button>
           </div>
         ))}
 
         <div className="word-input-row" style={{ marginBottom: 20 }}>
-          <div className="field">
+          <div className="field suggest-wrap">
             <input
               value={playerInput}
-              onChange={e => setPlayerInput(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && addPlayer()}
+              onChange={e => { setPlayerInput(e.target.value); setShowSuggest(true); }}
+              onFocus={() => setShowSuggest(true)}
+              onBlur={() => setTimeout(() => setShowSuggest(false), 150)}
+              onKeyDown={handleInputKeyDown}
               placeholder="add by username…"
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
             />
+            {showSuggest && visibleSuggestions.length > 0 && (
+              <ul className="suggest-list" role="listbox">
+                {visibleSuggestions.map((u, i) => {
+                  const typed = playerInput.trim().length;
+                  return (
+                    <li
+                      key={u.id}
+                      role="option"
+                      aria-selected={i === activeIdx}
+                      className={`suggest-item ${i === activeIdx ? "active" : ""}`}
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => addProfile(u)}
+                    >
+                      <Avatar username={u.username} url={u.avatar_url} size={28} />
+                      <span>
+                        <span className="suggest-match">{u.username.slice(0, typed)}</span>
+                        {u.username.slice(typed)}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
           <button className="btn btn-ghost btn-sm" onClick={addPlayer}>Add</button>
         </div>
@@ -1015,7 +1377,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
   const loadGame = useCallback(async (advance = true) => {
     const { data: g } = await supabase
       .from("games")
-      .select("*, game_players(*, profiles(username))")
+      .select("*, game_players(*, profiles(username, avatar_url))")
       .eq("id", gameId)
       .single();
 
@@ -1024,7 +1386,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
         await checkAndAdvanceTurn(g);
         const { data: gFresh } = await supabase
           .from("games")
-          .select("*, game_players(*, profiles(username))")
+          .select("*, game_players(*, profiles(username, avatar_url))")
           .eq("id", gameId)
           .single();
         setGame(gFresh);
@@ -1186,9 +1548,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
         <div className="section-label" style={{ marginTop: 24 }}>Players</div>
         {playerOrder?.map(p => (
           <div className="player-row" key={p.user_id}>
-            <div className="player-avatar">
-              {(p.profiles?.username || "?")[0].toUpperCase()}
-            </div>
+            <Avatar username={p.profiles?.username} url={p.profiles?.avatar_url} />
             <span className="player-name">@{p.profiles?.username}</span>
             {p.user_id === game.current_turn_user_id && game.status === "active" && (
               <span style={{ fontSize: 11, fontFamily: "'DM Mono', monospace", color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 10%, transparent)", padding: "2px 8px", borderRadius: 99 }}>
@@ -1213,6 +1573,16 @@ export default function App() {
   const [games, setGames] = useState([]);
   const [gamesLoading, setGamesLoading] = useState(false);
   const [recovering, setRecovering] = useState(RECOVERY_IN_URL);
+  const [soundEnabled, setSoundEnabled] = useState(getSoundEnabled);
+  const soundRef = useRef(soundEnabled);
+  const turnStateRef = useRef(null); // { [gameId]: isMyTurn } from the previous load; null until first load
+
+  useEffect(() => { soundRef.current = soundEnabled; }, [soundEnabled]);
+
+  function handleSoundChange(on) {
+    setSoundEnabled(on);
+    saveSoundEnabled(on);
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setSession(session));
@@ -1224,7 +1594,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!session?.user) { setProfile(null); setGames([]); setScreen("list"); return; }
+    if (!session?.user) { setProfile(null); setGames([]); setScreen("list"); turnStateRef.current = null; return; }
     supabase.from("profiles").select("*").eq("id", session.user.id).single()
       .then(({ data }) => setProfile(data));
   }, [session]);
@@ -1237,12 +1607,12 @@ export default function App() {
       .select("game_id")
       .eq("user_id", session.user.id);
 
-    if (!myGameIds?.length) { setGames([]); setGamesLoading(false); return; }
+    if (!myGameIds?.length) { setGames([]); turnStateRef.current = {}; setGamesLoading(false); return; }
 
     const ids = myGameIds.map(g => g.game_id);
     const { data } = await supabase
       .from("games")
-      .select("*, game_players(*, profiles(username))")
+      .select("*, game_players(*, profiles(username, avatar_url))")
       .in("id", ids)
       .order("created_at", { ascending: false });
 
@@ -1255,6 +1625,20 @@ export default function App() {
         return { ...g, word_count: count };
       })
     );
+
+    // Ring when a game newly becomes this user's turn (skipped on the very first load)
+    const uid = session.user.id;
+    const nextState = {};
+    gamesWithCount.forEach((g) => { nextState[g.id] = g.status === "active" && g.current_turn_user_id === uid; });
+    const prev = turnStateRef.current;
+    if (prev && soundRef.current) {
+      const becameMine = gamesWithCount.some(
+        (g) => nextState[g.id] && (prev[g.id] === false || (prev[g.id] === undefined && g.created_by !== uid))
+      );
+      if (becameMine) playBell();
+    }
+    turnStateRef.current = nextState;
+
     setGames(gamesWithCount);
     setGamesLoading(false);
   }, [session]);
@@ -1311,11 +1695,23 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
         <GameListScreen
           userId={session.user.id}
           username={profile.username}
+          avatarUrl={profile.avatar_url}
+          onOpenProfile={() => setScreen("profile")}
           games={games}
           loading={gamesLoading}
           onSelectGame={(g) => { setSelectedGameId(g.id); setScreen("play"); }}
           onCreateGame={() => setScreen("create")}
           onRefresh={() => loadGames()}
+        />
+      )}
+      {screen === "profile" && (
+        <ProfileScreen
+          userId={session.user.id}
+          profile={profile}
+          soundEnabled={soundEnabled}
+          onSoundChange={handleSoundChange}
+          onBack={() => { setScreen("list"); loadGames(true); }}
+          onProfileUpdated={setProfile}
         />
       )}
       {screen === "create" && (
