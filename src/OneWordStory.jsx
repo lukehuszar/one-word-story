@@ -44,6 +44,21 @@ function splitEntry(text) {
   return m ? { tail: m[1], body: m[2] } : { tail: "", body: text };
 }
 
+// A player's own row in a game (null if they were never in it)
+function getMyRow(game, userId) {
+  return game?.game_players?.find((p) => p.user_id === userId) || null;
+}
+
+// Next player in the rotation who hasn't left. Anyone who rejoined has the highest player_order, so they sit at the end.
+function nextActivePlayer(players, currentUserId) {
+  const sorted = [...players].sort((a, b) => a.player_order - b.player_order);
+  const active = sorted.filter((p) => !p.left_at);
+  if (!active.length) return null;
+  const cur = sorted.find((p) => p.user_id === currentUserId);
+  const curOrder = cur ? cur.player_order : -1;
+  return active.find((p) => p.player_order > curOrder) || active[0];
+}
+
 function timeLeft(deadline) {
   if (!deadline) return null;
   const diff = new Date(deadline) - new Date();
@@ -162,14 +177,8 @@ async function checkAndAdvanceTurn(game) {
   if (!game.turn_deadline) return;
   if (new Date() <= new Date(game.turn_deadline)) return;
 
-  const players = [...game.game_players].sort(
-    (a, b) => a.player_order - b.player_order
-  );
-  const currentIndex = players.findIndex(
-    (p) => p.user_id === game.current_turn_user_id
-  );
-  const nextIndex = (currentIndex + 1) % players.length;
-  const nextPlayer = players[nextIndex];
+  const nextPlayer = nextActivePlayer(game.game_players, game.current_turn_user_id);
+  if (!nextPlayer) return;
   const newDeadline = new Date();
   newDeadline.setHours(newDeadline.getHours() + game.turn_time_limit_hours);
 
@@ -215,12 +224,8 @@ async function submitWord(game, word, userId) {
     word_order: count || 0,
   });
 
-  const players = [...freshGame.game_players].sort(
-    (a, b) => a.player_order - b.player_order
-  );
-  const currentIndex = players.findIndex((p) => p.user_id === userId);
-  const nextIndex = (currentIndex + 1) % players.length;
-  const nextPlayer = players[nextIndex];
+  const nextPlayer =
+    nextActivePlayer(freshGame.game_players, userId) || { user_id: userId };
   const newDeadline = new Date();
   newDeadline.setHours(newDeadline.getHours() + freshGame.turn_time_limit_hours);
 
@@ -816,6 +821,63 @@ const css = `
     font-size: 15px;
   }
 
+  /* ── Word count, leave / archive ── */
+  .story-meta {
+    display: flex;
+    justify-content: flex-end;
+    margin: -12px 4px 16px;
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--ink3);
+  }
+  .action-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin: -4px 0 16px;
+  }
+  .end-game-row { gap: 8px; }
+  .player-row.left { opacity: 0.55; }
+  .left-tag {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--ink3);
+    background: var(--paper3);
+    padding: 2px 8px;
+    border-radius: 99px;
+  }
+  .game-card.left-game { opacity: 0.75; }
+  .game-card-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .nav-row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-family: 'Lora', serif;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    margin-bottom: 10px;
+  }
+  .nav-row:hover { border-color: var(--accent); }
+  .nav-row-count {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--ink3);
+  }
+
   .tab-row {
     display: flex;
     gap: 0;
@@ -1022,31 +1084,51 @@ function ResetPasswordScreen({ onDone }) {
   );
 }
 
-function GameListScreen({ userId, username, avatarUrl, onOpenProfile, onSelectGame, onCreateGame, onRefresh, games, loading }) {
-  const myTurnGames = games.filter(g => g.current_turn_user_id === userId && g.status === "active");
-  const waitingGames = games.filter(g => g.current_turn_user_id !== userId && g.status === "active");
-  const completedGames = games.filter(g => g.status === "completed");
+function GameCard({ game, userId, onSelect, action }) {
+  const me = getMyRow(game, userId);
+  const hasLeft = !!me?.left_at;
+  const active = game.status === "active";
+  // Only an active game can be "your turn" (a finished story never is)
+  const isMyTurn = active && !hasLeft && game.current_turn_user_id === userId;
+  const tl = timeLeft(game.turn_deadline);
+  const currentPlayer = game.game_players?.find(p => p.user_id === game.current_turn_user_id);
+  const currentName = currentPlayer?.profiles?.username || "someone";
+  const n = game.word_count || 0;
+  const words = `${n} ${n === 1 ? "word" : "words"}`;
 
-  function GameCard({ game }) {
-    const isMyTurn = game.current_turn_user_id === userId;
-    const tl = timeLeft(game.turn_deadline);
-    const currentPlayer = game.game_players?.find(p => p.user_id === game.current_turn_user_id);
-    const currentName = currentPlayer?.profiles?.username || "someone";
+  let meta;
+  if (!active) meta = words;
+  else if (hasLeft) meta = `You left · ${words}`;
+  else if (isMyTurn) meta = tl || "Time expired";
+  else meta = `Waiting for ${currentName} · ${tl || ""}`;
 
-    return (
-      <div className={`game-card ${isMyTurn ? "your-turn" : ""}`} onClick={() => onSelectGame(game)}>
-        {isMyTurn && <div className="your-turn-badge">✦ Your turn</div>}
-        <div className="game-card-title">{game.name}</div>
-        <div className="game-card-meta">
-          {game.status === "completed"
-            ? `${game.word_count || 0} words`
-            : isMyTurn
-              ? tl || "Time expired"
-              : `Waiting for ${currentName} · ${tl || ""}`}
+  return (
+    <div
+      className={`game-card ${isMyTurn ? "your-turn" : ""} ${active && hasLeft ? "left-game" : ""}`}
+      onClick={() => onSelect(game)}
+    >
+      <div className="game-card-row">
+        <div>
+          {isMyTurn && <div className="your-turn-badge">✦ Your turn</div>}
+          <div className="game-card-title">{game.name}</div>
+          <div className="game-card-meta">{meta}</div>
         </div>
+        {action}
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+function GameListScreen({ userId, username, avatarUrl, onOpenProfile, onSelectGame, onCreateGame, onRefresh, games, loading }) {
+  const isLeft = g => !!getMyRow(g, userId)?.left_at;
+  const visible = games.filter(g => !getMyRow(g, userId)?.archived_at);
+  const myTurnGames = visible.filter(g => g.status === "active" && !isLeft(g) && g.current_turn_user_id === userId);
+  const waitingGames = visible.filter(g => g.status === "active" && !isLeft(g) && g.current_turn_user_id !== userId);
+  const leftGames = visible.filter(g => g.status === "active" && isLeft(g));
+  const completedGames = visible.filter(g => g.status === "completed");
+
+  const renderCards = (list) =>
+    list.map(g => <GameCard key={g.id} game={g} userId={userId} onSelect={onSelectGame} />);
 
   return (
     <>
@@ -1063,28 +1145,14 @@ function GameListScreen({ userId, username, avatarUrl, onOpenProfile, onSelectGa
       <div className="screen">
         {loading ? (
           <div className="empty-state"><span className="spinner" /></div>
-        ) : games.length === 0 ? (
+        ) : visible.length === 0 ? (
           <div className="empty-state">No games yet.<br />Start one with the + button.</div>
         ) : (
           <>
-            {myTurnGames.length > 0 && (
-              <>
-                <div className="section-label">Your turn</div>
-                {myTurnGames.map(g => <GameCard key={g.id} game={g} />)}
-              </>
-            )}
-            {waitingGames.length > 0 && (
-              <>
-                <div className="section-label">Waiting</div>
-                {waitingGames.map(g => <GameCard key={g.id} game={g} />)}
-              </>
-            )}
-            {completedGames.length > 0 && (
-              <>
-                <div className="section-label">Completed</div>
-                {completedGames.map(g => <GameCard key={g.id} game={g} />)}
-              </>
-            )}
+            {myTurnGames.length > 0 && (<><div className="section-label">Your turn</div>{renderCards(myTurnGames)}</>)}
+            {waitingGames.length > 0 && (<><div className="section-label">Waiting</div>{renderCards(waitingGames)}</>)}
+            {leftGames.length > 0 && (<><div className="section-label">Left</div>{renderCards(leftGames)}</>)}
+            {completedGames.length > 0 && (<><div className="section-label">Completed</div>{renderCards(completedGames)}</>)}
           </>
         )}
 
@@ -1098,7 +1166,42 @@ function GameListScreen({ userId, username, avatarUrl, onOpenProfile, onSelectGa
   );
 }
 
-function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled, onSoundChange }) {
+function ArchiveScreen({ userId, games, onBack, onSelectGame, onUnarchive }) {
+  const archived = games.filter(g => g.status === "completed" && getMyRow(g, userId)?.archived_at);
+  return (
+    <>
+      <div className="header">
+        <button className="back-btn" onClick={onBack}>← Profile</button>
+        <div className="header-title">Archived stories</div>
+        <div style={{ width: 60 }} />
+      </div>
+      <div className="screen">
+        {archived.length === 0 ? (
+          <div className="empty-state">No archived stories.<br />Archive a finished story to tuck it away here.</div>
+        ) : (
+          archived.map(g => (
+            <GameCard
+              key={g.id}
+              game={g}
+              userId={userId}
+              onSelect={onSelectGame}
+              action={
+                <button
+                  className="btn btn-ghost btn-sm"
+                  onClick={e => { e.stopPropagation(); onUnarchive(g.id); }}
+                >
+                  Unarchive
+                </button>
+              }
+            />
+          ))
+        )}
+      </div>
+    </>
+  );
+}
+
+function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled, onSoundChange, archivedCount, onOpenArchive }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -1182,6 +1285,12 @@ function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled
           </div>
           <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
         </div>
+
+        <div className="section-label">Stories</div>
+        <button className="nav-row" onClick={onOpenArchive}>
+          <span>Archived stories</span>
+          <span className="nav-row-count">{archivedCount} ›</span>
+        </button>
 
         <div className="section-label">Settings</div>
         <label className="setting-row">
@@ -1470,7 +1579,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
         { event: "*", schema: "public", table: "games", filter: `id=eq.${gameId}` },
         () => loadGame(false))
       .on("postgres_changes",
-        { event: "INSERT", schema: "public", table: "game_players", filter: `game_id=eq.${gameId}` },
+        { event: "*", schema: "public", table: "game_players", filter: `game_id=eq.${gameId}` },
         () => loadGame(false))
       .subscribe();
 
@@ -1514,10 +1623,21 @@ function GamePlayScreen({ gameId, userId, onBack }) {
       // Read fresh so two people adding at once don't pick the same slot
       const { data: current, error: le } = await supabase
         .from("game_players")
-        .select("user_id, player_order")
+        .select("user_id, player_order, left_at")
         .eq("game_id", gameId);
       if (le) throw le;
-      if (current.some(p => p.user_id === profile.id)) throw new Error("Already in this game");
+      const existing = current.find(p => p.user_id === profile.id);
+      if (existing && !existing.left_at) throw new Error("Already in this game");
+
+      // Someone who left is re-added through rejoin_game, which puts them at the end of the queue
+      if (existing) {
+        const { error: re } = await supabase.rpc("rejoin_game", { p_game: gameId, p_user: profile.id });
+        if (re) throw re;
+        showToast(`@${profile.username} added`);
+        setShowAdd(false);
+        await loadGame(false);
+        return;
+      }
 
       const nextOrder = Math.max(-1, ...current.map(p => p.player_order)) + 1;
       const { error: ie } = await supabase.from("game_players").insert({
@@ -1533,6 +1653,31 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     } catch (e) {
       setAddError(e.message);
     }
+  }
+
+  async function handleLeave() {
+    if (!confirm("Leave this story? Your words stay in the story, and you can rejoin later at the end of the queue.")) return;
+    setError("");
+    const { error: e } = await supabase.rpc("leave_game", { p_game: gameId });
+    if (e) { setError(e.message); return; }
+    showToast("You left the game");
+    await loadGame(false);
+  }
+
+  async function handleRejoin() {
+    setError("");
+    const { error: e } = await supabase.rpc("rejoin_game", { p_game: gameId });
+    if (e) { setError(e.message); return; }
+    showToast("You're back in, at the end of the queue");
+    await loadGame(false);
+  }
+
+  async function handleArchive(archive) {
+    const { error: e } = await supabase.rpc("set_game_archived", { p_game: gameId, p_archived: archive });
+    if (e) { showToast(e.message); return; }
+    if (archive) { onBack(); return; } // back to wherever we came from; App reloads the list
+    showToast("Moved out of the archive");
+    await loadGame(false);
   }
 
   async function handleEndGame() {
@@ -1558,11 +1703,16 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
   if (!game) return null;
 
-  const isMyTurn = game.current_turn_user_id === userId && game.status === "active";
+  const me = getMyRow(game, userId);
+  const hasLeft = !!me?.left_at;
+  const isArchived = !!me?.archived_at;
+  const isMyTurn = game.current_turn_user_id === userId && game.status === "active" && !hasLeft;
   const currentPlayer = game.game_players?.find(p => p.user_id === game.current_turn_user_id);
   const currentPlayerName = currentPlayer?.profiles?.username || "someone";
   const tl = timeLeft(game.turn_deadline);
-  const playerOrder = [...(game.game_players || [])].sort((a, b) => a.player_order - b.player_order);
+  const playerOrder = [...(game.game_players || [])].sort(
+    (a, b) => (!!a.left_at - !!b.left_at) || a.player_order - b.player_order
+  ); // active players in turn order, then anyone who left
 
   return (
     <>
@@ -1574,7 +1724,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
       <div className="screen">
         {game.status === "completed" && (
-          <div className="completed-banner">This story is complete. {words.length} words written.</div>
+          <div className="completed-banner">This story is complete.</div>
         )}
 
         <div className="story-box">
@@ -1592,11 +1742,21 @@ function GamePlayScreen({ gameId, userId, onBack }) {
             })}
         </div>
 
+        <div className="story-meta">{words.length} {words.length === 1 ? "word" : "words"}</div>
+
+        {game.status === "completed" && me && (
+          <div className="action-row">
+            <button className="btn btn-ghost btn-sm" onClick={() => handleArchive(!isArchived)}>
+              {isArchived ? "Unarchive" : "Archive story"}
+            </button>
+          </div>
+        )}
+
         {game.status === "active" && (
           <>
             <div className={`turn-status ${isMyTurn ? "my-turn" : "waiting"}`}>
               <div className="turn-status-name">
-                {isMyTurn ? "Your turn" : `Waiting for @${currentPlayerName}`}
+                {hasLeft ? "You left this game" : isMyTurn ? "Your turn" : `Waiting for @${currentPlayerName}`}
               </div>
               {tl && <div className="turn-status-time">{tl}</div>}
             </div>
@@ -1634,17 +1794,25 @@ function GamePlayScreen({ gameId, userId, onBack }) {
             </div>
 
             <div className="end-game-row">
-              <button className="btn-danger" onClick={handleEndGame}>End story</button>
+              {hasLeft ? (
+                <button className="btn btn-primary btn-sm" onClick={handleRejoin}>Rejoin (end of queue)</button>
+              ) : (
+                <>
+                  <button className="btn-danger" onClick={handleLeave}>Leave game</button>
+                  <button className="btn-danger" onClick={handleEndGame}>End story</button>
+                </>
+              )}
             </div>
           </>
         )}
 
         <div className="section-label" style={{ marginTop: 24 }}>Players</div>
         {playerOrder?.map(p => (
-          <div className="player-row" key={p.user_id}>
+          <div className={`player-row ${p.left_at ? "left" : ""}`} key={p.user_id}>
             <Avatar username={p.profiles?.username} url={p.profiles?.avatar_url} />
             <span className="player-name">@{p.profiles?.username}</span>
-            {p.user_id === game.current_turn_user_id && game.status === "active" && (
+            {p.left_at && <span className="left-tag">left</span>}
+            {!p.left_at && p.user_id === game.current_turn_user_id && game.status === "active" && (
               <span style={{ fontSize: 11, fontFamily: "'DM Mono', monospace", color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 10%, transparent)", padding: "2px 8px", borderRadius: 99 }}>
                 current
               </span>
@@ -1652,7 +1820,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
           </div>
         ))}
 
-        {game.status === "active" && (
+        {game.status === "active" && !hasLeft && (
           <div style={{ marginTop: 12 }}>
             {!showAdd ? (
               <button className="btn btn-ghost btn-sm" onClick={() => setShowAdd(true)}>
@@ -1662,7 +1830,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
               <>
                 {addError && <div className="error-box">{addError}</div>}
                 <AddPlayerInput
-                  excludeIds={playerOrder.map(p => p.user_id)}
+                  excludeIds={playerOrder.filter(p => !p.left_at).map(p => p.user_id)}
                   onPick={handleAddPlayer}
                   onError={setAddError}
                 />
@@ -1690,6 +1858,7 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [screen, setScreen] = useState("list");
   const [selectedGameId, setSelectedGameId] = useState(null);
+  const [playFrom, setPlayFrom] = useState("list"); // where Back goes from a story: "list" or "archive"
   const [games, setGames] = useState([]);
   const [gamesLoading, setGamesLoading] = useState(false);
   const [recovering, setRecovering] = useState(RECOVERY_IN_URL);
@@ -1698,6 +1867,11 @@ export default function App() {
   const turnStateRef = useRef(null); // { [gameId]: isMyTurn } from the previous load; null until first load
 
   useEffect(() => { soundRef.current = soundEnabled; }, [soundEnabled]);
+
+  async function handleUnarchive(gameId) {
+    await supabase.rpc("set_game_archived", { p_game: gameId, p_archived: false });
+    loadGames(true);
+  }
 
   function handleSoundChange(on) {
     setSoundEnabled(on);
@@ -1771,7 +1945,7 @@ export default function App() {
     const channel = supabase
       .channel("my-games")
       .on("postgres_changes", { event: "*", schema: "public", table: "games" }, () => loadGames(true))
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "game_players" }, () => loadGames(true))
+      .on("postgres_changes", { event: "*", schema: "public", table: "game_players" }, () => loadGames(true))
       .subscribe();
     const onVisible = () => { if (document.visibilityState === "visible") loadGames(true); };
     document.addEventListener("visibilitychange", onVisible);
@@ -1819,7 +1993,7 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
           onOpenProfile={() => setScreen("profile")}
           games={games}
           loading={gamesLoading}
-          onSelectGame={(g) => { setSelectedGameId(g.id); setScreen("play"); }}
+          onSelectGame={(g) => { setSelectedGameId(g.id); setPlayFrom("list"); setScreen("play"); }}
           onCreateGame={() => setScreen("create")}
           onRefresh={() => loadGames()}
         />
@@ -1832,20 +2006,31 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
           onSoundChange={handleSoundChange}
           onBack={() => { setScreen("list"); loadGames(true); }}
           onProfileUpdated={setProfile}
+          archivedCount={games.filter(g => g.status === "completed" && getMyRow(g, session.user.id)?.archived_at).length}
+          onOpenArchive={() => setScreen("archive")}
+        />
+      )}
+      {screen === "archive" && (
+        <ArchiveScreen
+          userId={session.user.id}
+          games={games}
+          onBack={() => setScreen("profile")}
+          onSelectGame={(g) => { setSelectedGameId(g.id); setPlayFrom("archive"); setScreen("play"); }}
+          onUnarchive={handleUnarchive}
         />
       )}
       {screen === "create" && (
         <CreateGameScreen
           userId={session.user.id}
           onBack={() => setScreen("list")}
-          onCreated={(id) => { setSelectedGameId(id); loadGames(true); setScreen("play"); }}
+          onCreated={(id) => { setSelectedGameId(id); setPlayFrom("list"); loadGames(true); setScreen("play"); }}
         />
       )}
       {screen === "play" && selectedGameId && (
         <GamePlayScreen
           gameId={selectedGameId}
           userId={session.user.id}
-          onBack={() => { setScreen("list"); loadGames(true); }}
+          onBack={() => { setScreen(playFrom); loadGames(true); }}
         />
       )}
     </div>
