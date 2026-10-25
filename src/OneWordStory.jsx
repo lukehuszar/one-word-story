@@ -25,8 +25,13 @@ const ENTRY_RE = new RegExp(
   "u"
 );
 
+// Phone keyboards auto-curl quotes, which look wrong in the story font, so everything is stored and shown straight
+function straighten(str) {
+  return str.replace(/[“”„‟]/g, '"').replace(/[‘’‚‛]/g, "'");
+}
+
 function parseEntry(input) {
-  const trimmed = input.trim().replace(/\s+/g, " ");
+  const trimmed = straighten(input).trim().replace(/\s+/g, " ");
   if (!trimmed || trimmed.length > 50) return null;
   const m = ENTRY_RE.exec(trimmed);
   if (!m) return null;
@@ -39,7 +44,8 @@ function validateWord(input) {
 
 // For display: split a stored entry into the part that glues to the previous word and the rest.
 // Lenient on purpose so older entries (no tail) always render fine.
-function splitEntry(text) {
+function splitEntry(rawText) {
+  const text = straighten(rawText); // also fixes older entries saved with curly quotes
   const m = /^([^\s\p{L}\p{N}]{1,3})\s+(.+)$/u.exec(text);
   return m ? { tail: m[1], body: m[2] } : { tail: "", body: text };
 }
@@ -114,6 +120,43 @@ function getSoundEnabled() {
 function saveSoundEnabled(on) {
   try { localStorage.setItem(SOUND_KEY, String(on)); } catch { /* storage unavailable */ }
 }
+
+// ─── MY-WORDS HIGHLIGHT ──────────────────────────────────────────────────────
+// Stored per device. Colour plus a style (text colour, underline, or marker) so it doesn't rely on hue alone.
+const HIGHLIGHT_KEY = "ows_highlight";
+const DEFAULT_HIGHLIGHT = { color: "#8c2a08", style: "color" };
+const HIGHLIGHT_COLORS = [
+  { name: "Rust", value: "#8c2a08" },
+  { name: "Navy", value: "#1d3f9b" },
+  { name: "Purple", value: "#5b2a86" },
+  { name: "Forest", value: "#1f5f2e" },
+  { name: "Plain ink", value: "#3a2813" },
+];
+const HIGHLIGHT_STYLES = [
+  { id: "color", label: "Text color" },
+  { id: "underline", label: "Underline" },
+  { id: "marker", label: "Highlighter" },
+];
+
+function getHighlight() {
+  try {
+    const v = JSON.parse(localStorage.getItem(HIGHLIGHT_KEY));
+    if (v && /^#[0-9a-f]{6}$/i.test(v.color) && HIGHLIGHT_STYLES.some((s) => s.id === v.style)) return v;
+  } catch { /* storage unavailable or malformed */ }
+  return DEFAULT_HIGHLIGHT;
+}
+
+function saveHighlight(h) {
+  try { localStorage.setItem(HIGHLIGHT_KEY, JSON.stringify(h)); } catch { /* storage unavailable */ }
+}
+
+function applyHighlight(h) {
+  const root = document.documentElement;
+  root.style.setProperty("--mine-color", h.color);
+  root.dataset.mineStyle = h.style;
+}
+
+if (typeof window !== "undefined") applyHighlight(getHighlight());
 
 let audioCtx = null;
 
@@ -867,7 +910,36 @@ const css = `
     text-shadow: 0 0 1px rgba(58, 40, 19, 0.35);
     overflow-wrap: anywhere;
   }
-  .story-box .word-chip.mine { color: #8c2a08; }
+  .story-box .word-chip.mine { color: var(--mine-color, #8c2a08); }
+  :root[data-mine-style="underline"] .story-box .word-chip.mine {
+    text-decoration: underline;
+    text-decoration-color: var(--mine-color);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 4px;
+  }
+  :root[data-mine-style="marker"] .story-box .word-chip.mine {
+    color: #3a2813;
+    background: color-mix(in srgb, var(--mine-color) 35%, transparent);
+    border-radius: 3px;
+  }
+  .hl-dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 0, 0, 0.35);
+    margin-right: 6px;
+    vertical-align: -1px;
+  }
+  .hl-custom {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--ink2);
+    margin-bottom: 12px;
+  }
+  .hl-custom input { width: 40px; height: 30px; padding: 0; border: none; background: none; cursor: pointer; }
   .story-box .story-empty { color: #7b6140; font-size: 17px; }
 
   /* ── Story screen: back + refresh row, undo, custom time ── */
@@ -1334,6 +1406,7 @@ function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfile
   const [savingEmail, setSavingEmail] = useState(false);
   const [acctError, setAcctError] = useState("");
   const [acctInfo, setAcctInfo] = useState("");
+  const [hl, setHl] = useState(getHighlight);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -1417,6 +1490,13 @@ function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfile
     setPendingLocal(data?.user?.new_email || next);
     setEmailInput("");
     setAcctInfo("Check your inbox for a confirmation link. Your email won't change until you confirm it, and you may be asked to confirm from your current address too.");
+  }
+
+  function updateHighlight(patch) {
+    const next = { ...hl, ...patch };
+    setHl(next);
+    saveHighlight(next);
+    applyHighlight(next);
   }
 
   function handleSoundToggle(e) {
@@ -1512,6 +1592,45 @@ function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfile
             <div className="setting-hint">Rings while the app is open. Saved on this device.</div>
           </div>
         </label>
+
+        <div className="section-label">My words in stories</div>
+        <div className="story-box" style={{ minHeight: 0, padding: "14px 18px", marginBottom: 12, fontSize: 18 }}>
+          <span className="word-chip">Once upon a</span>{" "}
+          <span className="word-chip mine">time,</span>{" "}
+          <span className="word-chip">there lived</span>{" "}
+          <span className="word-chip mine">a</span>
+        </div>
+        <div className="format-row">
+          {HIGHLIGHT_COLORS.map(c => (
+            <button
+              key={c.value}
+              type="button"
+              className={`fmt-btn ${hl.color.toLowerCase() === c.value ? "on" : ""}`}
+              aria-pressed={hl.color.toLowerCase() === c.value}
+              onClick={() => updateHighlight({ color: c.value })}
+            >
+              <span className="hl-dot" style={{ background: c.value }} />{c.name}
+            </button>
+          ))}
+        </div>
+        <label className="hl-custom">
+          <input type="color" value={hl.color} onChange={e => updateHighlight({ color: e.target.value })} />
+          Pick any color
+        </label>
+        <div className="format-row">
+          {HIGHLIGHT_STYLES.map(st => (
+            <button
+              key={st.id}
+              type="button"
+              className={`fmt-btn ${hl.style === st.id ? "on" : ""}`}
+              aria-pressed={hl.style === st.id}
+              onClick={() => updateHighlight({ style: st.id })}
+            >{st.label}</button>
+          ))}
+        </div>
+        <div className="setting-hint" style={{ marginBottom: 10 }}>
+          Underline and Highlighter make your words stand out without relying on color. Saved on this device.
+        </div>
 
         <div style={{ marginTop: 24 }}>
           <button className="btn btn-ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
@@ -2183,7 +2302,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
             {isMyTurn && (
               <div className="username-hint" style={{ marginBottom: 12 }}>
-                Up to 2 punctuation marks before and after your word. Start with “. ” to end the previous sentence. A break starts your word on a new line or paragraph.
+                Up to 2 punctuation marks before and after your word. Start with &quot;. &quot; to end the previous sentence. A break starts your word on a new line or paragraph.
               </div>
             )}
 
