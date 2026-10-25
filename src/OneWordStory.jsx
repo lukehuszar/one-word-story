@@ -67,7 +67,28 @@ function timeLeft(deadline) {
   const m = Math.floor((diff % 3600000) / 60000);
   if (h > 24) return `${Math.floor(h / 24)}d left`;
   if (h > 0) return `${h}h ${m}m left`;
-  return `${m}m left`;
+  return `${m}m ${Math.floor((diff % 60000) / 1000)}s left`;
+}
+
+// Turn length in seconds. Older rows only have the hours column.
+function turnSeconds(g) {
+  return g?.turn_time_limit_seconds || (g?.turn_time_limit_hours || 24) * 3600;
+}
+
+const TURN_PRESETS = [3600, 21600, 43200, 86400, 172800]; // 1, 6, 12, 24, 48 hours
+const MIN_TURN_SECONDS = 10;
+const MAX_TURN_SECONDS = 7 * 24 * 3600;
+
+function validTurnSeconds(n) {
+  return Number.isInteger(n) && n >= MIN_TURN_SECONDS && n <= MAX_TURN_SECONDS;
+}
+
+function formatDuration(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0 && !m && !s) return h === 1 ? "1 hour" : `${h} hours`;
+  return [h && `${h} hr`, m && `${m} min`, s && `${s} sec`].filter(Boolean).join(" ");
 }
 
 function storyText(words) {
@@ -75,7 +96,8 @@ function storyText(words) {
     .map((w, i) => {
       const { tail, body } = splitEntry(w.word_text);
       if (i === 0) return body;
-      return tail ? `${tail} ${body}` : ` ${body}`;
+      const sep = w.break_before === "para" ? "\n\n" : w.break_before === "line" ? "\n" : " ";
+      return `${tail}${sep}${body}`;
     })
     .join("")
     .trimStart();
@@ -179,8 +201,7 @@ async function checkAndAdvanceTurn(game) {
 
   const nextPlayer = nextActivePlayer(game.game_players, game.current_turn_user_id);
   if (!nextPlayer) return;
-  const newDeadline = new Date();
-  newDeadline.setHours(newDeadline.getHours() + game.turn_time_limit_hours);
+  const newDeadline = new Date(Date.now() + turnSeconds(game) * 1000);
 
   await supabase
     .from("games")
@@ -191,7 +212,7 @@ async function checkAndAdvanceTurn(game) {
     .eq("id", game.id);
 }
 
-async function submitWord(game, word, userId) {
+async function submitWord(game, word, userId, fmt = {}) {
   const parsed = parseEntry(word);
   if (!parsed)
     throw new Error(
@@ -217,17 +238,20 @@ async function submitWord(game, word, userId) {
   if (parsed.tail && !count)
     throw new Error("There's no previous word to attach that punctuation to yet.");
 
-  await supabase.from("story_words").insert({
+  const { error: insertError } = await supabase.from("story_words").insert({
     game_id: game.id,
     user_id: userId,
     word_text: parsed.normalized,
     word_order: count || 0,
+    bold: !!fmt.bold,
+    italic: !!fmt.italic,
+    break_before: count ? fmt.break_before || "none" : "none", // nothing to break from on the first word
   });
+  if (insertError) throw new Error(insertError.message); // don't pass the turn if the word wasn't saved
 
   const nextPlayer =
     nextActivePlayer(freshGame.game_players, userId) || { user_id: userId };
-  const newDeadline = new Date();
-  newDeadline.setHours(newDeadline.getHours() + freshGame.turn_time_limit_hours);
+  const newDeadline = new Date(Date.now() + turnSeconds(freshGame) * 1000);
 
   await supabase
     .from("games")
@@ -240,7 +264,7 @@ async function submitWord(game, word, userId) {
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
 const css = `
-  @import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Mono:wght@400;500&family=IM+Fell+English:ital@0;1&display=swap');
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -482,7 +506,7 @@ const css = `
     margin-bottom: 20px;
     line-height: 1.8;
     font-size: 17px;
-    font-style: italic;
+    font-style: normal; /* italic is now per-word, so the box itself is upright */
     color: var(--ink);
     position: relative;
   }
@@ -820,6 +844,102 @@ const css = `
     font-style: italic;
     font-size: 15px;
   }
+
+  /* ── Parchment story window ── */
+  .story-box {
+    font-family: 'IM Fell English', 'Goudy Old Style', Garamond, Georgia, serif;
+    font-size: 19px;
+    line-height: 1.75;
+    color: #3a2813;
+    padding: 26px 24px;
+    border: 1px solid rgba(96, 64, 28, 0.55);
+    border-radius: 6px 11px 7px 12px / 11px 6px 12px 7px;
+    background-color: #e8d4a6;
+    background-image:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n' x='0' y='0' width='100%25' height='100%25'><feTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.38 0 0 0 0 0.26 0 0 0 0 0.1 0 0 0 0.35 0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>"),
+      radial-gradient(ellipse at 18% 12%, rgba(255, 247, 220, 0.85), transparent 55%),
+      radial-gradient(ellipse at 88% 92%, rgba(160, 105, 45, 0.35), transparent 60%),
+      linear-gradient(160deg, #ecdab0, #e0c995);
+    box-shadow:
+      inset 0 0 38px rgba(120, 78, 28, 0.5),
+      inset 0 0 6px rgba(90, 56, 20, 0.5),
+      0 3px 12px rgba(0, 0, 0, 0.22);
+    text-shadow: 0 0 1px rgba(58, 40, 19, 0.35);
+    overflow-wrap: anywhere;
+  }
+  .story-box .word-chip.mine { color: #8c2a08; }
+  .story-box .story-empty { color: #7b6140; font-size: 17px; }
+
+  /* ── Story screen: back + refresh row, undo, custom time ── */
+  .play-nav-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 8px 0 16px;
+  }
+  .undo-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    background: var(--paper2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 14px;
+    color: var(--ink2);
+  }
+  .duration-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .duration-row label { margin-bottom: 4px; }
+
+  /* ── Word formatting ── */
+  .w-bold { font-weight: 700; }
+  .w-italic { font-style: italic; }
+  .para-break { display: block; height: 0.75em; }
+
+  .format-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .fmt-btn {
+    min-width: 44px;
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--paper2);
+    color: var(--ink2);
+    font-family: 'Lora', serif;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .fmt-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .fmt-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .fmt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .inline-form { display: flex; gap: 8px; }
+  .inline-form input {
+    flex: 1;
+    min-width: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--paper2);
+    color: var(--ink);
+    font-family: 'Lora', serif;
+    font-size: 15px;
+    outline: none;
+    -webkit-appearance: none;
+  }
+  .inline-form input:focus { border-color: var(--accent); }
 
   /* ── Word count, leave / archive ── */
   .story-meta {
@@ -1201,12 +1321,19 @@ function ArchiveScreen({ userId, games, onBack, onSelectGame, onUnarchive }) {
   );
 }
 
-function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled, onSoundChange, archivedCount, onOpenArchive }) {
+function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfileUpdated, soundEnabled, onSoundChange, archivedCount, onOpenArchive }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const fileRef = useRef(null);
   const path = `${userId}/avatar.jpg`;
+  const [nameInput, setNameInput] = useState(profile.username);
+  const [emailInput, setEmailInput] = useState("");
+  const [pendingLocal, setPendingLocal] = useState(pendingEmail || "");
+  const [savingName, setSavingName] = useState(false);
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [acctError, setAcctError] = useState("");
+  const [acctInfo, setAcctInfo] = useState("");
 
   const showToast = (msg) => {
     setToast(msg);
@@ -1256,6 +1383,42 @@ function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled
     }
   }
 
+  async function handleUsernameSave() {
+    setAcctError("");
+    setAcctInfo("");
+    const un = nameInput.trim().toLowerCase();
+    if (un === profile.username) { setAcctError("That's already your username."); return; }
+    if (!/^[a-z0-9_]{3,20}$/.test(un)) {
+      setAcctError("Username: 3–20 characters, lowercase letters, numbers, underscores.");
+      return;
+    }
+    setSavingName(true);
+    const { error: ue } = await supabase.rpc("change_username", { p_username: un });
+    setSavingName(false);
+    if (ue) { setAcctError(ue.message); return; }
+    setNameInput(un);
+    onProfileUpdated({ ...profile, username: un });
+    showToast("Username updated");
+  }
+
+  async function handleEmailSave() {
+    setAcctError("");
+    setAcctInfo("");
+    const next = emailInput.trim();
+    if (!/^\S+@\S+\.\S+$/.test(next)) { setAcctError("Enter a valid email address."); return; }
+    if (next.toLowerCase() === (email || "").toLowerCase()) { setAcctError("That's already your email address."); return; }
+    setSavingEmail(true);
+    const { data, error: ee } = await supabase.auth.updateUser(
+      { email: next },
+      { emailRedirectTo: window.location.origin }
+    );
+    setSavingEmail(false);
+    if (ee) { setAcctError(ee.message); return; }
+    setPendingLocal(data?.user?.new_email || next);
+    setEmailInput("");
+    setAcctInfo("Check your inbox for a confirmation link. Your email won't change until you confirm it, and you may be asked to confirm from your current address too.");
+  }
+
   function handleSoundToggle(e) {
     const on = e.target.checked;
     onSoundChange(on);
@@ -1284,6 +1447,55 @@ function ProfileScreen({ userId, profile, onBack, onProfileUpdated, soundEnabled
             )}
           </div>
           <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+        </div>
+
+        <div className="section-label">Account</div>
+        {acctError && <div className="error-box">{acctError}</div>}
+        {acctInfo && <div className="completed-banner">{acctInfo}</div>}
+
+        <div className="field">
+          <label>Username</label>
+          <div className="inline-form">
+            <input
+              value={nameInput}
+              onChange={e => setNameInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleUsernameSave()}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={handleUsernameSave}
+              disabled={savingName || !nameInput.trim() || nameInput.trim().toLowerCase() === profile.username}
+            >
+              {savingName ? <span className="spinner" /> : "Save"}
+            </button>
+          </div>
+          <div className="username-hint">3–20 characters: lowercase letters, numbers, underscores</div>
+        </div>
+
+        <div className="field">
+          <label>Email</label>
+          <div className="username-hint" style={{ margin: "0 0 8px" }}>Current: {email}</div>
+          <div className="inline-form">
+            <input
+              type="email"
+              value={emailInput}
+              onChange={e => setEmailInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleEmailSave()}
+              placeholder="new email address"
+              autoComplete="email"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+            <button className="btn btn-ghost btn-sm" onClick={handleEmailSave} disabled={savingEmail || !emailInput.trim()}>
+              {savingEmail ? <span className="spinner" /> : "Update"}
+            </button>
+          </div>
+          {pendingLocal && (
+            <div className="username-hint">Waiting for you to confirm {pendingLocal}</div>
+          )}
         </div>
 
         <div className="section-label">Stories</div>
@@ -1413,9 +1625,67 @@ function AddPlayerInput({ excludeIds, onPick, onError }) {
   );
 }
 
+// Preset lengths plus a "Custom" option with exact minutes and seconds. Reports the total in seconds.
+function TurnTimePicker({ value, onChange }) {
+  const [custom, setCustom] = useState(!TURN_PRESETS.includes(value));
+  const [mins, setMins] = useState(String(Math.floor(value / 60)));
+  const [secs, setSecs] = useState(String(value % 60));
+  const toTotal = (m, s) => (parseInt(m, 10) || 0) * 60 + (parseInt(s, 10) || 0);
+  const digits = (v) => v.replace(/\D/g, "").slice(0, 5);
+
+  function onSelect(e) {
+    if (e.target.value === "custom") {
+      setCustom(true);
+      onChange(toTotal(mins, secs));
+    } else {
+      setCustom(false);
+      onChange(Number(e.target.value));
+    }
+  }
+
+  const total = toTotal(mins, secs);
+  return (
+    <div>
+      <select value={custom ? "custom" : String(value)} onChange={onSelect} aria-label="Time per turn">
+        {TURN_PRESETS.map(sec => <option key={sec} value={sec}>{formatDuration(sec)}</option>)}
+        <option value="custom">Custom…</option>
+      </select>
+      {custom && (
+        <>
+          <div className="duration-row">
+            <div>
+              <label>Minutes</label>
+              <input
+                inputMode="numeric"
+                value={mins}
+                onChange={e => { const v = digits(e.target.value); setMins(v); onChange(toTotal(v, secs)); }}
+                aria-label="Minutes"
+              />
+            </div>
+            <div>
+              <label>Seconds</label>
+              <input
+                inputMode="numeric"
+                value={secs}
+                onChange={e => { const v = digits(e.target.value); setSecs(v); onChange(toTotal(mins, v)); }}
+                aria-label="Seconds"
+              />
+            </div>
+          </div>
+          <div className="username-hint" style={validTurnSeconds(total) ? undefined : { color: "var(--accent)" }}>
+            {validTurnSeconds(total)
+              ? `Each turn lasts ${formatDuration(total)}`
+              : "Choose between 10 seconds and 7 days (10,080 minutes)"}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function CreateGameScreen({ userId, onBack, onCreated, toast }) {
   const [name, setName] = useState("");
-  const [timeLimit, setTimeLimit] = useState(24);
+  const [timeLimit, setTimeLimit] = useState(86400); // seconds
   const [players, setPlayers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1429,18 +1699,18 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
 
   async function createGame() {
     if (!name.trim()) { setError("Enter a game name"); return; }
+    if (!validTurnSeconds(timeLimit)) { setError("Turn time must be between 10 seconds and 7 days."); return; }
     setLoading(true);
     setError("");
     try {
       const allPlayers = [{ id: userId }, ...players];
 
-      const deadline = new Date();
-      deadline.setHours(deadline.getHours() + timeLimit);
+      const deadline = new Date(Date.now() + timeLimit * 1000);
 
       const { data: game, error: ge } = await supabase.from("games").insert({
         name: name.trim(),
         created_by: userId,
-        turn_time_limit_hours: timeLimit,
+        turn_time_limit_seconds: timeLimit,
         current_turn_user_id: userId,
         turn_deadline: deadline.toISOString(),
         status: "active",
@@ -1479,13 +1749,7 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
 
         <div className="field">
           <label>Time per turn</label>
-          <select value={timeLimit} onChange={e => setTimeLimit(Number(e.target.value))}>
-            <option value={1}>1 hour</option>
-            <option value={6}>6 hours</option>
-            <option value={12}>12 hours</option>
-            <option value={24}>24 hours</option>
-            <option value={48}>48 hours</option>
-          </select>
+          <TurnTimePicker value={timeLimit} onChange={setTimeLimit} />
         </div>
 
         <div className="section-label">Players</div>
@@ -1527,6 +1791,15 @@ function GamePlayScreen({ gameId, userId, onBack }) {
   const [toast, setToast] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [addError, setAddError] = useState("");
+  const [bold, setBold] = useState(false);
+  const [italic, setItalic] = useState(false);
+  const [brk, setBrk] = useState("none"); // "none" | "line" | "para"
+  const [undoUntil, setUndoUntil] = useState(0); // ms timestamp; the undo button shows until then
+  const [undoLeft, setUndoLeft] = useState(0);
+  const [undoing, setUndoing] = useState(false);
+  const [draftSeconds, setDraftSeconds] = useState(null); // turn time being edited, not yet saved
+  const [applyingTime, setApplyingTime] = useState(false);
+  const lastAdvanceRef = useRef(0);
   const [, setNow] = useState(Date.now()); // forces re-render so the countdown updates
 
   const showToast = (msg) => {
@@ -1568,6 +1841,37 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
   useEffect(() => { loadGame(true); }, [loadGame]);
 
+  // Discard an unsaved timer edit whenever the saved value changes
+  useEffect(() => { setDraftSeconds(null); }, [game?.turn_time_limit_seconds]);
+
+  // Undo countdown (30 seconds after submitting a word)
+  useEffect(() => {
+    if (!undoUntil) return;
+    const tick = () => {
+      const left = Math.ceil((undoUntil - Date.now()) / 1000);
+      if (left <= 0) { setUndoUntil(0); setUndoLeft(0); } else setUndoLeft(left);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [undoUntil]);
+
+  // Once a turn is under 10 minutes from its deadline, tick every second and skip it the moment it expires
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!game || game.status !== "active" || !game.turn_deadline) return;
+      const left = new Date(game.turn_deadline).getTime() - Date.now();
+      if (left < 600000) {
+        setNow(Date.now());
+        if (left <= 0 && Date.now() - lastAdvanceRef.current > 5000) {
+          lastAdvanceRef.current = Date.now();
+          loadGame(true);
+        }
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [game, loadGame]);
+
   // Live updates: re-read whenever this game or its words change
   useEffect(() => {
     const channel = supabase
@@ -1605,8 +1909,16 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     setError("");
     setSubmitting(true);
     try {
-      await submitWord(game, wordInput.trim(), userId);
+      await submitWord(game, wordInput.trim(), userId, {
+        bold,
+        italic,
+        break_before: words.length ? brk : "none",
+      });
       setWordInput("");
+      setBold(false);
+      setItalic(false);
+      setBrk("none");
+      setUndoUntil(Date.now() + 30000);
       showToast("Word added!");
       await loadGame();
     } catch (e) {
@@ -1680,6 +1992,33 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     await loadGame(false);
   }
 
+  async function handleUndo() {
+    setError("");
+    setUndoing(true);
+    const { data, error: ue } = await supabase.rpc("undo_last_word", { p_game: gameId });
+    setUndoing(false);
+    setUndoUntil(0);
+    if (ue) { setError(ue.message); return; }
+    if (data) { // put the word back in the box so it can be edited
+      setWordInput(data.word_text || "");
+      setBold(!!data.bold);
+      setItalic(!!data.italic);
+      setBrk(data.break_before || "none");
+    }
+    showToast("Word taken back");
+    await loadGame(false);
+  }
+
+  async function handleApplyTime() {
+    if (!validTurnSeconds(draftSeconds)) return;
+    setApplyingTime(true);
+    const { error: te } = await supabase.rpc("set_turn_time_limit", { p_game: gameId, p_seconds: draftSeconds });
+    setApplyingTime(false);
+    if (te) { showToast(te.message); return; }
+    showToast("Turn time updated");
+    await loadGame(false);
+  }
+
   async function handleEndGame() {
     if (!confirm("End this story?")) return;
     await supabase.from("games").update({ status: "completed" }).eq("id", gameId);
@@ -1713,12 +2052,14 @@ function GamePlayScreen({ gameId, userId, onBack }) {
   const playerOrder = [...(game.game_players || [])].sort(
     (a, b) => (!!a.left_at - !!b.left_at) || a.player_order - b.player_order
   ); // active players in turn order, then anyone who left
+  const currentSeconds = turnSeconds(game);
+  const lastWord = words[words.length - 1];
+  const canUndo = game.status === "active" && undoLeft > 0 && lastWord?.user_id === userId;
 
   return (
     <>
       <div className="header">
-        <button className="back-btn" onClick={onBack}>← Games</button>
-        <div className="header-title" style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{game.name}</div>
+        <div className="header-title" style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{game.name}</div>
         <button className="btn btn-ghost btn-sm" onClick={copyStory}>Copy</button>
       </div>
 
@@ -1733,10 +2074,16 @@ function GamePlayScreen({ gameId, userId, onBack }) {
             : words.map((w, i) => {
               const { tail, body } = splitEntry(w.word_text);
               const attach = tail && i > 0; // tail glues to the previous word
+              const sep =
+                i === 0 ? null
+                : w.break_before === "para" ? <span className="para-break" />
+                : w.break_before === "line" ? <br />
+                : " ";
               return (
                 <span key={w.id} className={`word-chip ${w.user_id === userId ? "mine" : ""}`}>
-                  {i > 0 && !attach ? " " : ""}
-                  {attach ? `${tail} ${body}` : body}
+                  {attach ? tail : ""}
+                  {sep}
+                  <span className={`${w.bold ? "w-bold" : ""} ${w.italic ? "w-italic" : ""}`}>{body}</span>
                 </span>
               );
             })}
@@ -1763,6 +2110,21 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
             {error && <div className="error-box">{error}</div>}
 
+            {hasLeft && (
+              <div className="end-game-row" style={{ marginBottom: 12 }}>
+                <button className="btn btn-primary btn-sm" onClick={handleRejoin}>Rejoin (end of queue)</button>
+              </div>
+            )}
+
+            {!isMyTurn && canUndo && (
+              <div className="undo-row">
+                <span>Your word was added.</span>
+                <button className="btn btn-ghost btn-sm" onClick={handleUndo} disabled={undoing}>
+                  {undoing ? <span className="spinner" /> : `↶ Undo (${undoLeft}s)`}
+                </button>
+              </div>
+            )}
+
             {isMyTurn && (
               <div className="word-input-row">
                 <div className="field">
@@ -1771,6 +2133,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
                     onChange={e => setWordInput(e.target.value)}
                     onKeyDown={e => e.key === "Enter" && handleSubmit()}
                     placeholder="one word…"
+                    style={{ fontWeight: bold ? 700 : 400, fontStyle: italic ? "italic" : "normal" }}
                     autoFocus
                     autoComplete="off"
                     autoCapitalize="none"
@@ -1784,27 +2147,53 @@ function GamePlayScreen({ gameId, userId, onBack }) {
             )}
 
             {isMyTurn && (
-              <div className="username-hint" style={{ marginBottom: 12 }}>
-                Up to 2 punctuation marks before and after your word. Start with “. ” to end the previous sentence.
+              <div className="format-row">
+                <button
+                  type="button"
+                  className={`fmt-btn ${bold ? "on" : ""}`}
+                  style={{ fontWeight: 700 }}
+                  aria-pressed={bold}
+                  aria-label="Bold"
+                  onClick={() => setBold(b => !b)}
+                >B</button>
+                <button
+                  type="button"
+                  className={`fmt-btn ${italic ? "on" : ""}`}
+                  style={{ fontStyle: "italic" }}
+                  aria-pressed={italic}
+                  aria-label="Italic"
+                  onClick={() => setItalic(v => !v)}
+                >I</button>
+                <button
+                  type="button"
+                  className={`fmt-btn ${brk === "line" ? "on" : ""}`}
+                  aria-pressed={brk === "line"}
+                  disabled={!words.length}
+                  onClick={() => setBrk(b => (b === "line" ? "none" : "line"))}
+                >↵ Line break</button>
+                <button
+                  type="button"
+                  className={`fmt-btn ${brk === "para" ? "on" : ""}`}
+                  aria-pressed={brk === "para"}
+                  disabled={!words.length}
+                  onClick={() => setBrk(b => (b === "para" ? "none" : "para"))}
+                >¶ New paragraph</button>
               </div>
             )}
 
-            <div className="refresh-row">
-              <button className="refresh-btn" onClick={() => loadGame(true)}>↻ Refresh</button>
-            </div>
+            {isMyTurn && (
+              <div className="username-hint" style={{ marginBottom: 12 }}>
+                Up to 2 punctuation marks before and after your word. Start with “. ” to end the previous sentence. A break starts your word on a new line or paragraph.
+              </div>
+            )}
 
-            <div className="end-game-row">
-              {hasLeft ? (
-                <button className="btn btn-primary btn-sm" onClick={handleRejoin}>Rejoin (end of queue)</button>
-              ) : (
-                <>
-                  <button className="btn-danger" onClick={handleLeave}>Leave game</button>
-                  <button className="btn-danger" onClick={handleEndGame}>End story</button>
-                </>
-              )}
-            </div>
           </>
         )}
+
+        <div className="play-nav-row">
+          <button className="btn btn-ghost btn-sm" onClick={onBack}>← Games</button>
+          <button className="refresh-btn" onClick={() => loadGame(true)}>↻ Refresh</button>
+        </div>
 
         <div className="section-label" style={{ marginTop: 24 }}>Players</div>
         {playerOrder?.map(p => (
@@ -1845,6 +2234,32 @@ function GamePlayScreen({ gameId, userId, onBack }) {
             )}
           </div>
         )}
+
+        {game.status === "active" && !hasLeft && (
+          <>
+            <div className="section-label" style={{ marginTop: 24 }}>Turn timer</div>
+            <div className="field" style={{ marginBottom: 8 }}>
+              <TurnTimePicker key={currentSeconds} value={draftSeconds ?? currentSeconds} onChange={setDraftSeconds} />
+            </div>
+            {draftSeconds != null && draftSeconds !== currentSeconds && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleApplyTime}
+                disabled={applyingTime || !validTurnSeconds(draftSeconds)}
+              >
+                {applyingTime ? <span className="spinner" /> : "Update turn time"}
+              </button>
+            )}
+            <div className="username-hint">Saving also adjusts the current turn's clock.</div>
+          </>
+        )}
+
+        {game.status === "active" && !hasLeft && (
+          <div className="end-game-row" style={{ marginTop: 28 }}>
+            <button className="btn-danger" onClick={handleLeave}>Leave game</button>
+            <button className="btn-danger" onClick={handleEndGame}>End story</button>
+          </div>
+        )}
       </div>
 
       <Toast msg={toast} />
@@ -1858,7 +2273,17 @@ export default function App() {
   const [profile, setProfile] = useState(null);
   const [screen, setScreen] = useState("list");
   const [selectedGameId, setSelectedGameId] = useState(null);
-  const [playFrom, setPlayFrom] = useState("list"); // where Back goes from a story: "list" or "archive"
+
+  // Every screen change pushes a history entry, so the browser/phone Back button steps back through screens
+  const navigate = useCallback((next, { gameId = null, replace = false } = {}) => {
+    const state = { ows: true, screen: next, gameId };
+    if (replace) window.history.replaceState(state, "");
+    else window.history.pushState(state, "");
+    setSelectedGameId(gameId);
+    setScreen(next);
+  }, []);
+  const goBack = useCallback(() => window.history.back(), []);
+  const loadGamesRef = useRef(null);
   const [games, setGames] = useState([]);
   const [gamesLoading, setGamesLoading] = useState(false);
   const [recovering, setRecovering] = useState(RECOVERY_IN_URL);
@@ -1939,6 +2364,21 @@ export default function App() {
 
   useEffect(() => { if (session) loadGames(); }, [session, loadGames]);
 
+  useEffect(() => { loadGamesRef.current = loadGames; }, [loadGames]);
+
+  // Back/forward: show the screen that history entry belongs to
+  useEffect(() => {
+    window.history.replaceState({ ows: true, screen: "list" }, "");
+    const onPop = (e) => {
+      const st = e.state;
+      setScreen(st?.ows ? st.screen : "list");
+      setSelectedGameId(st?.ows ? st.gameId ?? null : null);
+      loadGamesRef.current?.(true);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   // Live updates for the game list (new games, turn changes, finished stories)
   useEffect(() => {
     if (!session?.user) return;
@@ -1990,11 +2430,11 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
           userId={session.user.id}
           username={profile.username}
           avatarUrl={profile.avatar_url}
-          onOpenProfile={() => setScreen("profile")}
+          onOpenProfile={() => navigate("profile")}
           games={games}
           loading={gamesLoading}
-          onSelectGame={(g) => { setSelectedGameId(g.id); setPlayFrom("list"); setScreen("play"); }}
-          onCreateGame={() => setScreen("create")}
+          onSelectGame={(g) => navigate("play", { gameId: g.id })}
+          onCreateGame={() => navigate("create")}
           onRefresh={() => loadGames()}
         />
       )}
@@ -2002,35 +2442,37 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
         <ProfileScreen
           userId={session.user.id}
           profile={profile}
+          email={session.user.email}
+          pendingEmail={session.user.new_email}
           soundEnabled={soundEnabled}
           onSoundChange={handleSoundChange}
-          onBack={() => { setScreen("list"); loadGames(true); }}
+          onBack={goBack}
           onProfileUpdated={setProfile}
           archivedCount={games.filter(g => g.status === "completed" && getMyRow(g, session.user.id)?.archived_at).length}
-          onOpenArchive={() => setScreen("archive")}
+          onOpenArchive={() => navigate("archive")}
         />
       )}
       {screen === "archive" && (
         <ArchiveScreen
           userId={session.user.id}
           games={games}
-          onBack={() => setScreen("profile")}
-          onSelectGame={(g) => { setSelectedGameId(g.id); setPlayFrom("archive"); setScreen("play"); }}
+          onBack={goBack}
+          onSelectGame={(g) => navigate("play", { gameId: g.id })}
           onUnarchive={handleUnarchive}
         />
       )}
       {screen === "create" && (
         <CreateGameScreen
           userId={session.user.id}
-          onBack={() => setScreen("list")}
-          onCreated={(id) => { setSelectedGameId(id); setPlayFrom("list"); loadGames(true); setScreen("play"); }}
+          onBack={goBack}
+          onCreated={(id) => { loadGames(true); navigate("play", { gameId: id, replace: true }); }}
         />
       )}
       {screen === "play" && selectedGameId && (
         <GamePlayScreen
           gameId={selectedGameId}
           userId={session.user.id}
-          onBack={() => { setScreen(playFrom); loadGames(true); }}
+          onBack={goBack}
         />
       )}
     </div>
