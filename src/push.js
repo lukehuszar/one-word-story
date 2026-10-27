@@ -1,6 +1,14 @@
 // Web Push helpers. The server side is the `send-push` Edge Function plus the push_* database functions.
 // Everything here must run from a tap (iOS refuses permission prompts that aren't user-initiated).
 
+// Every web address (including each Vercel preview link) is a separate "site" with its own notification permission
+// and its own subscription. Registering from test copies creates stray duplicates (and Chrome spam warnings),
+// so notifications are only registered from the real address.
+export const PUSH_ORIGIN = import.meta.env.VITE_PUSH_ORIGIN || "https://one-word-story-roan.vercel.app";
+export function pushAllowedHere() {
+  return typeof window !== "undefined" && window.location.origin === PUSH_ORIGIN;
+}
+
 export function pushSupported() {
   return typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 }
@@ -38,13 +46,14 @@ async function saveSubscription(supabase, sub) {
 
 // Is this device currently subscribed (and allowed)?
 export async function isPushEnabled() {
-  if (!pushSupported() || Notification.permission !== "granted") return false;
+  if (!pushSupported() || !pushAllowedHere() || Notification.permission !== "granted") return false;
   return !!(await currentSubscription());
 }
 
 // Ask permission, subscribe, and save the subscription for the signed-in user. Call from a tap.
 export async function enablePush(supabase, supabaseUrl, anonKey) {
   if (!pushSupported()) throw new Error("This browser can't receive notifications.");
+  if (!pushAllowedHere()) throw new Error("Notifications only work in the installed app at " + PUSH_ORIGIN.replace("https://", "") + ".");
   const permission = await Notification.requestPermission();
   if (permission !== "granted") {
     throw new Error("Notifications are blocked. Allow them for this app in your phone's settings, then try again.");
@@ -71,7 +80,7 @@ export async function disablePush(supabase) {
 // After sign-in: if this device is already subscribed, (re)attach it to whoever is signed in now.
 export async function syncPushSubscription(supabase) {
   try {
-    if (!pushSupported() || Notification.permission !== "granted") return;
+    if (!pushSupported() || !pushAllowedHere() || Notification.permission !== "granted") return;
     const sub = await currentSubscription();
     if (sub) await saveSubscription(supabase, sub);
   } catch { /* best effort */ }

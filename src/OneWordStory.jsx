@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { useRegisterSW } from "virtual:pwa-register/react";
-import { pushSupported, isIOSDevice, isInstalledApp, isPushEnabled, enablePush, disablePush, syncPushSubscription, sendTestPush } from "./push.js";
+import { pushSupported, pushAllowedHere, PUSH_ORIGIN, isIOSDevice, isInstalledApp, isPushEnabled, enablePush, disablePush, syncPushSubscription, sendTestPush } from "./push.js";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 // Set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (in .env locally, or in Vercel's Environment Variables)
@@ -984,10 +984,12 @@ const css = `
   }
   .action-row {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 8px;
     margin: -4px 0 16px;
   }
+  .action-row .reopen-btn { flex: 1 1 100%; }
   .end-game-row { gap: 8px; }
   .player-row.left { opacity: 0.55; }
   .left-tag {
@@ -1417,6 +1419,17 @@ function NotificationsSetting({ toast }) {
     finally { setBusy(false); }
   }
 
+  if (SUPPORTED && !pushAllowedHere()) {
+    return (
+      <div className="setting-row">
+        <div>
+          <div className="setting-title">Notify me on my turn</div>
+          <div className="setting-hint">Only available in the installed app at {PUSH_ORIGIN.replace("https://", "")}, not on test copies of the site.</div>
+        </div>
+      </div>
+    );
+  }
+
   if (!SUPPORTED) {
     return (
       <div className="setting-row">
@@ -1424,7 +1437,7 @@ function NotificationsSetting({ toast }) {
           <div className="setting-title">Notify me on my turn</div>
           <div className="setting-hint">
             {isIOSDevice() && !isInstalledApp()
-              ? "On iPhone, first tap Share, then “Add to Home Screen”. Open the app from the new icon and turn this on there."
+              ? "On iPhone, first tap Share (in Safari or Chrome), then “Add to Home Screen”. Open the app from the new icon and turn this on there."
               : "This browser can't receive notifications. Try installing the app from Chrome."}
           </div>
         </div>
@@ -2127,6 +2140,14 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     await loadGame(false);
   }
 
+  async function handleReopen() {
+    if (!confirm("Reopen this story?\n\nIt becomes active again and the next player is notified.")) return;
+    const { error: e } = await supabase.rpc("reopen_story", { p_game: gameId });
+    if (e) { showToast(e.message); return; }
+    showToast("Story reopened");
+    await loadGame(false);
+  }
+
   async function handleDeleteStory() {
     if (!confirm("Delete this story from your list?\n\nThe other players keep their copy, but you won't be able to get it back.")) return;
     const { error: e } = await supabase.rpc("delete_story_for_me", { p_game: gameId });
@@ -2192,6 +2213,11 @@ function GamePlayScreen({ gameId, userId, onBack }) {
   const me = getMyRow(game, userId);
   const hasLeft = !!me?.left_at;
   const isArchived = !!me?.archived_at;
+  const REOPEN_MS = 24 * 60 * 60 * 1000;
+  const reopenMsLeft = game.status === "completed" && game.completed_at
+    ? new Date(game.completed_at).getTime() + REOPEN_MS - Date.now() : 0;
+  const reopenHoursLeft = Math.max(1, Math.ceil(reopenMsLeft / 3600000));
+  const canReopen = reopenMsLeft > 0 && !!me && !hasLeft;
   const isMyTurn = game.current_turn_user_id === userId && game.status === "active" && !hasLeft;
   const currentPlayer = game.game_players?.find(p => p.user_id === game.current_turn_user_id);
   const currentPlayerName = currentPlayer?.profiles?.username || "someone";
@@ -2241,6 +2267,9 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
         {game.status === "completed" && me && (
           <div className="action-row">
+            {canReopen && (
+              <button className="btn btn-primary btn-sm reopen-btn" onClick={handleReopen}>Reopen story · {reopenHoursLeft}h left</button>
+            )}
             {!isArchived && <button className="btn-danger" onClick={handleDeleteStory}>Delete story</button>}
             <button className="btn btn-ghost btn-sm" onClick={() => handleArchive(!isArchived)}>
               {isArchived ? "Unarchive" : "Archive story"}
@@ -2479,7 +2508,7 @@ function PwaBanners({ showInstall }) {
   if (isIOS()) {
     return (
       <div className="pwa-banner" role="status">
-        <div className="pwa-banner-text"><strong>Install on your iPhone</strong><span>In Safari, tap the Share button, then “Add to Home Screen”.</span></div>
+        <div className="pwa-banner-text"><strong>Install on your iPhone</strong><span>Tap the Share button in your browser (Safari or Chrome), then “Add to Home Screen”.</span></div>
         <button className="pwa-dismiss" onClick={dismiss} aria-label="Dismiss">✕</button>
       </div>
     );
