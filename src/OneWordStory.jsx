@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { useRegisterSW } from "virtual:pwa-register/react";
+import { pushSupported, isIOSDevice, isInstalledApp, isPushEnabled, enablePush, disablePush, syncPushSubscription, sendTestPush } from "./push.js";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 // Set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (in .env locally, or in Vercel's Environment Variables)
@@ -15,6 +16,13 @@ const RECOVERY_IN_URL =
   typeof window !== "undefined" && window.location.hash.includes("type=recovery");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// A tapped notification opens "/?game=<id>" (a query string, because the URL hash is used for password-reset links)
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEEP_LINK_GAME = (() => {
+  try { const g = new URLSearchParams(window.location.search).get("game"); return g && UUID_RE.test(g) ? g : null; }
+  catch { return null; }
+})();
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 // Punctuation allowed around a word (hyphens/apostrophes inside a word are handled separately)
@@ -1377,6 +1385,72 @@ function ArchiveScreen({ userId, games, onBack, onSelectGame, onUnarchive }) {
   );
 }
 
+function NotificationsSetting({ toast }) {
+  const SUPPORTED = pushSupported();
+  const [on, setOn] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const denied = SUPPORTED && Notification.permission === "denied";
+
+  useEffect(() => {
+    let alive = true;
+    if (SUPPORTED) isPushEnabled().then(v => { if (alive) setOn(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, [SUPPORTED]);
+
+  async function toggle(e) {
+    const want = e.target.checked;
+    setBusy(true); setMsg("");
+    try {
+      if (want) { await enablePush(supabase, SUPABASE_URL, SUPABASE_ANON_KEY); setOn(true); toast?.("Notifications on"); }
+      else { await disablePush(supabase); setOn(false); toast?.("Notifications off"); }
+    } catch (err) {
+      setMsg(err.message || "Couldn't change notifications.");
+      setOn(await isPushEnabled().catch(() => false));
+    } finally { setBusy(false); }
+  }
+
+  async function test() {
+    setBusy(true); setMsg("");
+    try { await sendTestPush(supabase); toast?.("Test sent. It should arrive in a few seconds."); }
+    catch (err) { setMsg(err.message || "Couldn't send the test."); }
+    finally { setBusy(false); }
+  }
+
+  if (!SUPPORTED) {
+    return (
+      <div className="setting-row">
+        <div>
+          <div className="setting-title">Notify me on my turn</div>
+          <div className="setting-hint">
+            {isIOSDevice() && !isInstalledApp()
+              ? "On iPhone, first tap Share, then “Add to Home Screen”. Open the app from the new icon and turn this on there."
+              : "This browser can't receive notifications. Try installing the app from Chrome."}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <label className="setting-row">
+        <input type="checkbox" checked={on} disabled={busy || denied} onChange={toggle} />
+        <div>
+          <div className="setting-title">Notify me on my turn</div>
+          <div className="setting-hint">
+            {denied
+              ? "Notifications are blocked for this app. Allow them in your phone's settings for One Word Story, then come back."
+              : "A message when it's your turn, when you're added to a story, or when one finishes. Per device."}
+          </div>
+        </div>
+      </label>
+      {on && <button className="btn btn-ghost" style={{ marginBottom: 8 }} disabled={busy} onClick={test}>Send me a test notification</button>}
+      {msg && <div className="error-box">{msg}</div>}
+    </>
+  );
+}
+
 function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfileUpdated, soundEnabled, onSoundChange, archivedCount, onOpenArchive }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -1576,6 +1650,7 @@ function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfile
             <div className="setting-hint">Rings while the app is open. Saved on this device.</div>
           </div>
         </label>
+        <NotificationsSetting toast={showToast} />
 
         <div className="section-label">My words in stories</div>
         <div className="story-box" style={{ minHeight: 0, padding: "14px 18px", marginBottom: 12, fontSize: 18 }}>
@@ -1617,7 +1692,7 @@ function ProfileScreen({ userId, profile, email, pendingEmail, onBack, onProfile
         </div>
 
         <div style={{ marginTop: 24 }}>
-          <button className="btn btn-ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
+          <button className="btn btn-ghost" onClick={async () => { await disablePush(supabase).catch(() => {}); await supabase.auth.signOut(); }}>Sign out</button>
         </div>
       </div>
       <Toast msg={toast} />
@@ -2506,6 +2581,30 @@ export default function App() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  // Notifications: re-attach this device to whoever is signed in, and open the story a tapped notification points to
+  const deepLinkDone = useRef(false);
+  useEffect(() => {
+    if (!session || !profile) return;
+    syncPushSubscription(supabase);
+    if (DEEP_LINK_GAME && !deepLinkDone.current) {
+      deepLinkDone.current = true;
+      window.history.replaceState({ ows: true, screen: "list" }, "", window.location.pathname); // drop ?game= from the URL
+      navigate("play", { gameId: DEEP_LINK_GAME });
+    }
+  }, [session, profile, navigate]);
+
+  // App already open when a notification is tapped: the service worker tells us which story to show
+  useEffect(() => {
+    if (!session || !("serviceWorker" in navigator)) return;
+    const onMsg = (e) => {
+      if (e.data?.type === "OPEN_GAME" && UUID_RE.test(e.data.gameId || "")) {
+        navigate("play", { gameId: e.data.gameId });
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+  }, [session, navigate]);
 
   // Live updates for the game list (new games, turn changes, finished stories)
   useEffect(() => {
