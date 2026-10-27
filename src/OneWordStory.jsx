@@ -1305,7 +1305,7 @@ function GameCard({ game, userId, onSelect, action }) {
 
 function GameListScreen({ userId, username, avatarUrl, onOpenProfile, onSelectGame, onCreateGame, onRefresh, games, loading }) {
   const isLeft = g => !!getMyRow(g, userId)?.left_at;
-  const visible = games.filter(g => !getMyRow(g, userId)?.archived_at);
+  const visible = games.filter(g => !getMyRow(g, userId)?.archived_at && !getMyRow(g, userId)?.deleted_at);
   const myTurnGames = visible.filter(g => g.status === "active" && !isLeft(g) && g.current_turn_user_id === userId);
   const waitingGames = visible.filter(g => g.status === "active" && !isLeft(g) && g.current_turn_user_id !== userId);
   const leftGames = visible.filter(g => g.status === "active" && isLeft(g));
@@ -2127,6 +2127,13 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     await loadGame(false);
   }
 
+  async function handleDeleteStory() {
+    if (!confirm("Delete this story from your list?\n\nThe other players keep their copy, but you won't be able to get it back.")) return;
+    const { error: e } = await supabase.rpc("delete_story_for_me", { p_game: gameId });
+    if (e) { showToast(e.message); return; }
+    onBack(); // back to the list; App reloads it, and the story is gone
+  }
+
   async function handleUndo() {
     setError("");
     setUndoing(true);
@@ -2198,9 +2205,10 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
   return (
     <>
-      <div className="header">
-        <div className="header-title" style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{game.name}</div>
-        <button className="btn btn-ghost btn-sm" onClick={copyStory}>Copy</button>
+      <div className="header" style={{ gap: 10 }}>
+        <button className="back-btn" onClick={onBack} style={{ flexShrink: 0 }}>← Games</button>
+        <div className="header-title" style={{ flex: 1, minWidth: 0, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{game.name}</div>
+        <button className="btn btn-ghost btn-sm" onClick={copyStory} style={{ flexShrink: 0 }}>Copy</button>
       </div>
 
       <div className="screen">
@@ -2233,6 +2241,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
         {game.status === "completed" && me && (
           <div className="action-row">
+            {!isArchived && <button className="btn-danger" onClick={handleDeleteStory}>Delete story</button>}
             <button className="btn btn-ghost btn-sm" onClick={() => handleArchive(!isArchived)}>
               {isArchived ? "Unarchive" : "Archive story"}
             </button>
