@@ -36,12 +36,21 @@ function sameString(a: string, b: string) {
   return diff === 0;
 }
 
+// A secret pasted into a dashboard often picks up stray characters (spaces, a line break, quotes, "=" padding).
+// web-push wants plain URL-safe base64, so tidy it rather than fail.
+function vapidKey(name: string): string | null {
+  const raw = Deno.env.get(name);
+  if (!raw) return null;
+  const k = raw.replace(/\s+/g, "").replace(/^["']+|["']+$/g, "").replace(/=+$/, "");
+  return k || null;
+}
+
 type Payload = { title: string; body: string; url: string; tag: string };
 
 async function sendTo(userIds: string[], payload: Payload) {
   if (!userIds.length) return;
-  const pub = Deno.env.get("VAPID_PUBLIC_KEY");
-  const priv = Deno.env.get("VAPID_PRIVATE_KEY");
+  const pub = vapidKey("VAPID_PUBLIC_KEY");
+  const priv = vapidKey("VAPID_PRIVATE_KEY");
   if (!pub || !priv) { console.error("VAPID keys are not set"); return; }
   webpush.setVapidDetails(APP_URL, pub, priv);
 
@@ -134,7 +143,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
   if (req.method === "GET") {
-    return new Response(JSON.stringify({ publicKey: Deno.env.get("VAPID_PUBLIC_KEY") ?? null }), {
+    return new Response(JSON.stringify({ publicKey: vapidKey("VAPID_PUBLIC_KEY") }), {
       headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "public, max-age=3600" },
     });
   }
