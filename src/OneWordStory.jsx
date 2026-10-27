@@ -1065,7 +1065,7 @@ const css = `
     bottom: calc(12px + env(safe-area-inset-bottom));
     max-width: 456px;
     margin: 0 auto;
-    z-index: 60;
+    z-index: 120; /* above the + button (z-index 100) */
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1077,6 +1077,8 @@ const css = `
     font-size: 14px;
     line-height: 1.35;
   }
+  /* On the games list the + button lives at the bottom right: sit above it so neither covers the other */
+  .pwa-banner.above-fab { bottom: calc(88px + env(safe-area-inset-bottom)); }
   .pwa-banner-text { flex: 1; min-width: 0; }
   .pwa-banner-text strong { display: block; font-weight: 600; }
   .pwa-banner-text span { opacity: 0.8; font-size: 13px; }
@@ -2459,7 +2461,7 @@ function installDismissed() {
   try { return localStorage.getItem(INSTALL_DISMISSED_KEY) === "1"; } catch { return false; }
 }
 
-function PwaBanners({ showInstall }) {
+function PwaBanners({ showInstall, aboveFab }) {
   const { needRefresh: [needRefresh], updateServiceWorker } = useRegisterSW();
   const [installEvent, setInstallEvent] = useState(null);
   const [dismissed, setDismissed] = useState(installDismissed);
@@ -2482,7 +2484,7 @@ function PwaBanners({ showInstall }) {
 
   if (needRefresh) {
     return (
-      <div className="pwa-banner" role="status">
+      <div className={`pwa-banner ${aboveFab ? "above-fab" : ""}`} role="status">
         <div className="pwa-banner-text"><strong>Update available</strong><span>A new version of One Word Story is ready.</span></div>
         <button className="pwa-primary" onClick={() => updateServiceWorker(true)}>Update</button>
       </div>
@@ -2493,7 +2495,7 @@ function PwaBanners({ showInstall }) {
 
   if (installEvent) {
     return (
-      <div className="pwa-banner" role="status">
+      <div className={`pwa-banner ${aboveFab ? "above-fab" : ""}`} role="status">
         <div className="pwa-banner-text"><strong>Install One Word Story</strong><span>Add it to your home screen to get notified on your turn.</span></div>
         <button className="pwa-primary" onClick={async () => {
           installEvent.prompt();
@@ -2507,7 +2509,7 @@ function PwaBanners({ showInstall }) {
 
   if (isIOS()) {
     return (
-      <div className="pwa-banner" role="status">
+      <div className={`pwa-banner ${aboveFab ? "above-fab" : ""}`} role="status">
         <div className="pwa-banner-text"><strong>Install on your iPhone</strong><span>Tap the Share button in your browser (Safari or Chrome), then “Add to Home Screen”.</span></div>
         <button className="pwa-dismiss" onClick={dismiss} aria-label="Dismiss">✕</button>
       </div>
@@ -2675,7 +2677,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <PwaBanners showInstall={screen === "list"} />
+      <PwaBanners showInstall={screen === "list"} aboveFab={screen === "list"} />
       {screen === "list" && (
         <GameListScreen
           userId={session.user.id}
