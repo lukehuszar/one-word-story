@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { useRegisterSW } from "virtual:pwa-register/react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 // Set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (in .env locally, or in Vercel's Environment Variables)
@@ -1047,6 +1048,38 @@ const css = `
     background: var(--accent);
     color: #fff;
   }
+  /* ── Install / update banner (PWA) ── */
+  .pwa-banner {
+    position: fixed;
+    left: 12px; right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    max-width: 456px;
+    margin: 0 auto;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--ink);
+    color: var(--paper);
+    border-radius: var(--radius);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.25);
+    font-size: 14px;
+    line-height: 1.35;
+  }
+  .pwa-banner-text { flex: 1; min-width: 0; }
+  .pwa-banner-text strong { display: block; font-weight: 600; }
+  .pwa-banner-text span { opacity: 0.8; font-size: 13px; }
+  .pwa-banner button {
+    font: inherit;
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .pwa-banner .pwa-primary { background: var(--accent); color: #fff; font-weight: 600; }
+  .pwa-banner .pwa-dismiss { background: transparent; color: var(--paper); opacity: 0.7; padding: 8px; }
 `;
 
 // ─── COMPONENTS ──────────────────────────────────────────────────────────────
@@ -2300,6 +2333,77 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 }
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
+// ───────── Install / update banners (PWA) ─────────
+const INSTALL_DISMISSED_KEY = "ows-install-dismissed";
+function isStandalone() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+function isIOS() {
+  // iPadOS reports itself as a Mac, so also check for touch support
+  return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+function installDismissed() {
+  try { return localStorage.getItem(INSTALL_DISMISSED_KEY) === "1"; } catch { return false; }
+}
+
+function PwaBanners({ showInstall }) {
+  const { needRefresh: [needRefresh], updateServiceWorker } = useRegisterSW();
+  const [installEvent, setInstallEvent] = useState(null);
+  const [dismissed, setDismissed] = useState(installDismissed);
+
+  useEffect(() => {
+    const onPrompt = (e) => { e.preventDefault(); setInstallEvent(e); };
+    const onInstalled = () => setInstallEvent(null);
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  function dismiss() {
+    setDismissed(true);
+    try { localStorage.setItem(INSTALL_DISMISSED_KEY, "1"); } catch { /* private mode: fine */ }
+  }
+
+  if (needRefresh) {
+    return (
+      <div className="pwa-banner" role="status">
+        <div className="pwa-banner-text"><strong>Update available</strong><span>A new version of One Word Story is ready.</span></div>
+        <button className="pwa-primary" onClick={() => updateServiceWorker(true)}>Update</button>
+      </div>
+    );
+  }
+
+  if (!showInstall || dismissed || isStandalone()) return null;
+
+  if (installEvent) {
+    return (
+      <div className="pwa-banner" role="status">
+        <div className="pwa-banner-text"><strong>Install One Word Story</strong><span>Add it to your home screen to get notified on your turn.</span></div>
+        <button className="pwa-primary" onClick={async () => {
+          installEvent.prompt();
+          await installEvent.userChoice.catch(() => {});
+          setInstallEvent(null);
+        }}>Install</button>
+        <button className="pwa-dismiss" onClick={dismiss} aria-label="Dismiss">✕</button>
+      </div>
+    );
+  }
+
+  if (isIOS()) {
+    return (
+      <div className="pwa-banner" role="status">
+        <div className="pwa-banner-text"><strong>Install on your iPhone</strong><span>In Safari, tap the Share button, then “Add to Home Screen”.</span></div>
+        <button className="pwa-dismiss" onClick={dismiss} aria-label="Dismiss">✕</button>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
@@ -2429,11 +2533,12 @@ export default function App() {
     );
   }
 
-  if (!session) return <div className="app"><AuthScreen /></div>;
+  if (!session) return <div className="app"><PwaBanners showInstall /><AuthScreen /></div>;
   if (!profile) return <div className="app"><div className="screen empty-state"><span className="spinner" /></div></div>;
 
   return (
     <div className="app">
+      <PwaBanners showInstall={screen === "list"} />
       {screen === "list" && (
         <GameListScreen
           userId={session.user.id}
