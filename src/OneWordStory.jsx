@@ -2,9 +2,12 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-// Replace these with your Supabase project URL and anon key
-const SUPABASE_URL = "https://wzeenraywlbxhecdnrfv.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_7LjFzl3p3NkkEoCv7AL1qQ_eA1zhltb";
+// Set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY (in .env locally, or in Vercel's Environment Variables)
+// to point the app at a different Supabase project. The fallbacks are this project's public values:
+// the anon ("publishable") key is designed to be public; what protects the data is Row Level Security.
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://wzeenraywlbxhecdnrfv.supabase.co";
+const SUPABASE_ANON_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_7LjFzl3p3NkkEoCv7AL1qQ_eA1zhltb";
 
 // Read the URL hash before Supabase consumes it, so we know the user arrived via a reset link
 const RECOVERY_IN_URL =
@@ -38,10 +41,6 @@ function parseEntry(input) {
   return { normalized: trimmed, tail: m[1] || "", prefix: m[2], body: m[3], suffix: m[4] };
 }
 
-function validateWord(input) {
-  return parseEntry(input) !== null;
-}
-
 // For display: split a stored entry into the part that glues to the previous word and the rest.
 // Lenient on purpose so older entries (no tail) always render fine.
 function splitEntry(rawText) {
@@ -55,16 +54,6 @@ function getMyRow(game, userId) {
   return game?.game_players?.find((p) => p.user_id === userId) || null;
 }
 
-// Next player in the rotation who hasn't left. Anyone who rejoined has the highest player_order, so they sit at the end.
-function nextActivePlayer(players, currentUserId) {
-  const sorted = [...players].sort((a, b) => a.player_order - b.player_order);
-  const active = sorted.filter((p) => !p.left_at);
-  if (!active.length) return null;
-  const cur = sorted.find((p) => p.user_id === currentUserId);
-  const curOrder = cur ? cur.player_order : -1;
-  return active.find((p) => p.player_order > curOrder) || active[0];
-}
-
 function timeLeft(deadline) {
   if (!deadline) return null;
   const diff = new Date(deadline) - new Date();
@@ -76,9 +65,9 @@ function timeLeft(deadline) {
   return `${m}m ${Math.floor((diff % 60000) / 1000)}s left`;
 }
 
-// Turn length in seconds. Older rows only have the hours column.
+// Turn length in seconds (every game row has turn_time_limit_seconds; the legacy hours column is kept in sync by the database)
 function turnSeconds(g) {
-  return g?.turn_time_limit_seconds || (g?.turn_time_limit_hours || 24) * 3600;
+  return g?.turn_time_limit_seconds || 86400;
 }
 
 const TURN_PRESETS = [3600, 21600, 43200, 86400, 172800]; // 1, 6, 12, 24, 48 hours
@@ -237,77 +226,37 @@ function resizeImageToBlob(file, size = 256) {
 }
 
 // ─── GAME LOGIC ──────────────────────────────────────────────────────────────
-async function checkAndAdvanceTurn(game) {
-  if (!game || game.status !== "active") return;
-  if (!game.turn_deadline) return;
-  if (new Date() <= new Date(game.turn_deadline)) return;
-
-  const nextPlayer = nextActivePlayer(game.game_players, game.current_turn_user_id);
-  if (!nextPlayer) return;
-  const newDeadline = new Date(Date.now() + turnSeconds(game) * 1000);
-
-  await supabase
-    .from("games")
-    .update({
-      current_turn_user_id: nextPlayer.user_id,
-      turn_deadline: newDeadline.toISOString(),
-    })
-    .eq("id", game.id);
+// The rules (whose turn it is, skipping expired turns, saving words) live in the database as
+// functions; the app only asks. Each call either succeeds or throws with a readable message.
+async function rpc(name, args) {
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw new Error(error.message);
+  return data;
 }
 
-async function submitWord(game, word, userId, fmt = {}) {
-  const parsed = parseEntry(word);
-  if (!parsed)
+// Skip the current player if their deadline has passed. Safe to call from every open phone.
+function advanceIfExpired(gameId) {
+  return rpc("advance_game_if_expired", { p_game: gameId });
+}
+
+async function submitWord(game, word, fmt = {}) {
+  // Same check the server runs, so mistakes get instant feedback without a round trip
+  if (!parseEntry(word))
     throw new Error(
       'Use one word, with up to 2 punctuation marks before and 2 after (e.g. "Heavens!"). To end the previous sentence, start with punctuation and a space (e.g. ". Then,").'
     );
-
-  await checkAndAdvanceTurn(game);
-
-  const { data: freshGame } = await supabase
-    .from("games")
-    .select("*, game_players(*)")
-    .eq("id", game.id)
-    .single();
-
-  if (freshGame.current_turn_user_id !== userId)
-    throw new Error("Not your turn.");
-
-  const { count } = await supabase
-    .from("story_words")
-    .select("*", { count: "exact", head: true })
-    .eq("game_id", game.id);
-
-  if (parsed.tail && !count)
-    throw new Error("There's no previous word to attach that punctuation to yet.");
-
-  const { error: insertError } = await supabase.from("story_words").insert({
-    game_id: game.id,
-    user_id: userId,
-    word_text: parsed.normalized,
-    word_order: count || 0,
-    bold: !!fmt.bold,
-    italic: !!fmt.italic,
-    break_before: count ? fmt.break_before || "none" : "none", // nothing to break from on the first word
+  await rpc("submit_word", {
+    p_game: game.id,
+    p_text: word,
+    p_bold: !!fmt.bold,
+    p_italic: !!fmt.italic,
+    p_break: fmt.break_before || "none",
   });
-  if (insertError) throw new Error(insertError.message); // don't pass the turn if the word wasn't saved
-
-  const nextPlayer =
-    nextActivePlayer(freshGame.game_players, userId) || { user_id: userId };
-  const newDeadline = new Date(Date.now() + turnSeconds(freshGame) * 1000);
-
-  await supabase
-    .from("games")
-    .update({
-      current_turn_user_id: nextPlayer.user_id,
-      turn_deadline: newDeadline.toISOString(),
-    })
-    .eq("id", game.id);
 }
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
 const css = `
-  @import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=DM+Mono:wght@400;500&family=IM+Fell+English:ital@0;1&display=swap');
+  /* fonts are self-hosted (imported in main.jsx), so the installed app works offline */
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -342,6 +291,7 @@ const css = `
     background: var(--paper);
     color: var(--ink);
     min-height: 100vh;
+    min-height: 100dvh; /* iOS: 100vh jumps when the address bar moves */
     -webkit-font-smoothing: antialiased;
   }
 
@@ -349,6 +299,7 @@ const css = `
     max-width: 480px;
     margin: 0 auto;
     min-height: 100vh;
+    min-height: 100dvh;
     padding: 0 0 env(safe-area-inset-bottom, 0);
   }
 
@@ -356,7 +307,7 @@ const css = `
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 20px 20px 12px;
+    padding: calc(20px + env(safe-area-inset-top, 0px)) 20px 12px; /* clear the status bar in the installed app */
     border-bottom: 1px solid var(--border);
   }
 
@@ -753,7 +704,7 @@ const css = `
 
   .toast {
     position: fixed;
-    bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%);
     background: var(--ink);
@@ -818,7 +769,7 @@ const css = `
 
   .fab {
     position: fixed;
-    bottom: 24px;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
     right: 20px;
     width: 52px;
     height: 52px;
@@ -1116,7 +1067,7 @@ function Avatar({ username, url, size = 32 }) {
   );
 }
 
-function AuthScreen({ onAuth }) {
+function AuthScreen() {
   const [mode, setMode] = useState("login"); // login | signup | forgot
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -1654,7 +1605,7 @@ function AddPlayerInput({ excludeIds, onPick, onError }) {
     if (!q) { setSuggestions([]); return; }
     const id = ++reqId.current;
     const t = setTimeout(async () => {
-      const escaped = q.replace(/[\%_]/g, "\\$&"); // _ is valid in usernames, so don't treat it as a wildcard
+      const escaped = q.replace(/[%_]/g, "\\$&"); // _ is valid in usernames, so don't treat it as a wildcard
       const { data } = await supabase
         .from("profiles")
         .select("id, username, avatar_url")
@@ -1802,7 +1753,7 @@ function TurnTimePicker({ value, onChange }) {
   );
 }
 
-function CreateGameScreen({ userId, onBack, onCreated, toast }) {
+function CreateGameScreen({ userId, onBack, onCreated }) {
   const [name, setName] = useState("");
   const [timeLimit, setTimeLimit] = useState(86400); // seconds
   const [players, setPlayers] = useState([]);
@@ -1822,29 +1773,12 @@ function CreateGameScreen({ userId, onBack, onCreated, toast }) {
     setLoading(true);
     setError("");
     try {
-      const allPlayers = [{ id: userId }, ...players];
-
-      const deadline = new Date(Date.now() + timeLimit * 1000);
-
-      const { data: game, error: ge } = await supabase.from("games").insert({
-        name: name.trim(),
-        created_by: userId,
-        turn_time_limit_seconds: timeLimit,
-        current_turn_user_id: userId,
-        turn_deadline: deadline.toISOString(),
-        status: "active",
-      }).select().single();
-      if (ge) throw ge;
-
-      const playerRows = allPlayers.map((p, i) => ({
-        game_id: game.id,
-        user_id: p.id,
-        player_order: i,
-      }));
-      const { error: ple } = await supabase.from("game_players").insert(playerRows);
-      if (ple) throw ple;
-
-      onCreated(game.id);
+      const gameId = await rpc("create_game", {
+        p_name: name.trim(),
+        p_seconds: timeLimit,
+        p_player_ids: players.map(p => p.id),
+      });
+      onCreated(gameId);
     } catch (e) {
       setError(e.message);
       setLoading(false);
@@ -1936,7 +1870,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
     if (g) {
       if (advance && g.status === "active" && g.turn_deadline && new Date() > new Date(g.turn_deadline)) {
-        await checkAndAdvanceTurn(g);
+        await advanceIfExpired(g.id).catch(() => {}); // another phone may have just done it; either way we re-read next
         const { data: gFresh } = await supabase
           .from("games")
           .select("*, game_players(*, profiles(username, avatar_url))")
@@ -2028,7 +1962,7 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     setError("");
     setSubmitting(true);
     try {
-      await submitWord(game, wordInput.trim(), userId, {
+      await submitWord(game, wordInput.trim(), {
         bold,
         italic,
         break_before: words.length ? brk : "none",
@@ -2047,37 +1981,11 @@ function GamePlayScreen({ gameId, userId, onBack }) {
     }
   }
 
-  // New players always go to the end of the rotation (highest player_order + 1)
+  // New players go to the end of the queue; someone who left comes back at the end too (the server decides)
   async function handleAddPlayer(profile) {
     setAddError("");
     try {
-      // Read fresh so two people adding at once don't pick the same slot
-      const { data: current, error: le } = await supabase
-        .from("game_players")
-        .select("user_id, player_order, left_at")
-        .eq("game_id", gameId);
-      if (le) throw le;
-      const existing = current.find(p => p.user_id === profile.id);
-      if (existing && !existing.left_at) throw new Error("Already in this game");
-
-      // Someone who left is re-added through rejoin_game, which puts them at the end of the queue
-      if (existing) {
-        const { error: re } = await supabase.rpc("rejoin_game", { p_game: gameId, p_user: profile.id });
-        if (re) throw re;
-        showToast(`@${profile.username} added`);
-        setShowAdd(false);
-        await loadGame(false);
-        return;
-      }
-
-      const nextOrder = Math.max(-1, ...current.map(p => p.player_order)) + 1;
-      const { error: ie } = await supabase.from("game_players").insert({
-        game_id: gameId,
-        user_id: profile.id,
-        player_order: nextOrder,
-      });
-      if (ie) throw ie;
-
+      await rpc("add_player", { p_game: gameId, p_user: profile.id });
       showToast(`@${profile.username} added`);
       setShowAdd(false);
       await loadGame(false);
@@ -2140,9 +2048,14 @@ function GamePlayScreen({ gameId, userId, onBack }) {
 
   async function handleEndGame() {
     if (!confirm("End this story?")) return;
-    await supabase.from("games").update({ status: "completed" }).eq("id", gameId);
-    showToast("Story completed!");
-    await loadGame();
+    setError("");
+    try {
+      await rpc("end_game", { p_game: gameId });
+      showToast("Story completed!");
+      await loadGame();
+    } catch (e) {
+      setError(e.message);
+    }
   }
 
   async function copyStory() {
@@ -2454,15 +2367,7 @@ export default function App() {
       .in("id", ids)
       .order("created_at", { ascending: false });
 
-    const gamesWithCount = await Promise.all(
-      (data || []).map(async (g) => {
-        const { count } = await supabase
-          .from("story_words")
-          .select("*", { count: "exact", head: true })
-          .eq("game_id", g.id);
-        return { ...g, word_count: count };
-      })
-    );
+    const gamesWithCount = data || []; // word_count is kept up to date by the database
 
     // Ring when a game newly becomes this user's turn (skipped on the very first load)
     const uid = session.user.id;
@@ -2514,21 +2419,6 @@ export default function App() {
     };
   }, [session, loadGames]);
 
-  if (SUPABASE_URL === "https://YOUR_PROJECT.supabase.co") {
-    return (
-      <div style={{ padding: 32, fontFamily: "'DM Mono', monospace", fontSize: 13, lineHeight: 1.8, color: "var(--color-text-primary)" }}>
-        <div style={{ fontSize: 22, fontFamily: "Georgia, serif", fontWeight: 600, marginBottom: 16 }}>Setup required</div>
-        <p style={{ marginBottom: 12 }}>Open <code>OneWordStory.jsx</code> and replace the two constants at the top:</p>
-        <pre style={{ background: "var(--color-background-secondary)", padding: 16, borderRadius: 8, fontSize: 12, overflowX: "auto" }}>
-{`const SUPABASE_URL = "https://YOUR_PROJECT.supabase.co";
-const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
-        </pre>
-        <p style={{ marginTop: 12 }}>Find these in your Supabase dashboard under <strong>Project Settings → API</strong>.</p>
-        <p style={{ marginTop: 12 }}>Also run the SQL schema from the implementation plan in your Supabase SQL Editor first.</p>
-      </div>
-    );
-  }
-
   if (recovering) {
     return (
       <div className="app">
@@ -2539,7 +2429,7 @@ const SUPABASE_ANON_KEY = "YOUR_ANON_KEY";`}
     );
   }
 
-  if (!session) return <div className="app"><AuthScreen onAuth={setSession} /></div>;
+  if (!session) return <div className="app"><AuthScreen /></div>;
   if (!profile) return <div className="app"><div className="screen empty-state"><span className="spinner" /></div></div>;
 
   return (
