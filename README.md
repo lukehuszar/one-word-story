@@ -10,11 +10,11 @@ A mobile-first web app (installable on your phone, with push notifications) for 
 
 ## The game, and why I built this
 
-*One Word Story* is an improv game where a group of people write a story together, one word at a time. When it's done, the story is read aloud.
+*One Word Story* is an improv game where a group of people write a story together, one word at a time. When it's done, the story is read aloud to the group.
 
-Writing a story with any semblance of coherence, plot and characters this way is challenging, and strangely captivating. Nobody controls where it goes, so the results are always strange and wacky and take many unexpected turns.
+Writing a story with any semblance of coherence, plot and characters this way is challenging, and strangely captivating. Nobody controls where it goes, so the results are always surprising and wacky and take many unexpected turns.
 
-The game is a staple of my friend group. We have a shared Google Docs folder of more than 50 stories, some of them with multiple chapters and footnotes, and they are always a treat to come back to and read.
+The game is a staple of my friend group. We have a shared Google Docs folder of more than 50 stories, some of them with multiple chapters and dozens of footnotes, and they are always a treat to come back to and read.
 
 The goal of this project was to create a **slower-paced, remote variant** of the game: one we could play with friends over long stretches of time, during the "in-between" moments of our busy lives. Instead of sitting in a circle, each player gets a notification when it's their turn, adds a word from their phone, and gets on with their day.
 
@@ -101,10 +101,11 @@ By default the app connects to the live Supabase project (its URL and publishabl
 
 I plan to keep adding features over time. Currently on the list:
 
-- A "your turn is ending soon" reminder
-- Testing and polishing the iPhone home-screen app
+- Text-to-speech to read completed stories aloud
+- A "window of visibility", where only some of the most recent words of the story are visible, to mimic the IRL version of the game
+- Art! More stylized options for story appearance, and player avatars
 - A custom domain
 
 ## How this was built
 
-Most of my training is in data science, not software development. I built this project working closely with Claude (Anthropic's AI assistant), which was instrumental in putting it together: I set the direction, made the design decisions and tested everything with real players, while Claude helped design and write much of the code. Along the way I learned a lot about SQL, database security, and how a modern web app fits together, from service workers to deployment.
+Most of my training is in data science, not software development. I built this project working closely with Claude, which was instrumental in putting it together: I set the direction, made the design decisions and tested everything with real players, while Claude helped design and write much of the code. Along the way I learned a lot about SQL, database security, and how a modern web app fits together, from service workers to deployment.
